@@ -1,0 +1,11 @@
+# 僅版控：方程式戰士、kenny_assets、map_editor（其餘目錄不納入）
+/*
+!/.gitignore
+!/方程式戰士/
+!/kenny_assets/
+!/map_editor/
+!/方程式戰士/**
+!/kenny_assets/**
+!/map_editor/**
+__pycache__/
+*.py[cod]

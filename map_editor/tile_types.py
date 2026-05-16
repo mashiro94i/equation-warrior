@@ -1,0 +1,65 @@
+"""Kenney GID 語意（與 方程式戰士/core/tile_types.py 同步）。"""
+from __future__ import annotations
+
+GID_SPAWN = 66043
+GID_ENEMIES = frozenset({65834, 65838, 65840, 131449, 131448})
+GID_ENEMY_WALK_ALT = frozenset({65835, 65837, 65841})
+GID_WALLS = frozenset({65850, 65875, 13142, 131342})
+GID_AREA_TILE = 65796
+GID_MAP_CALC_INTEGRAL_BLOCK = 65855
+GID_MAP_CALC_DERIVATIVE_BLOCK = 65856
+GID_DESTRUCTIBLE_WALLS = frozenset({13168, 131368})
+GID_LEVEL_EXITS = frozenset({65992, 66019})
+GID_SPIKE = 65935
+GID_HEART = 65904
+GID_SPIKE_SWITCH = 65931
+GID_KEY = 65880
+GID_KEY_DOOR = 65881
+
+ALL_SEMANTIC_GIDS = (
+    {
+        GID_SPAWN,
+        GID_SPIKE,
+        GID_HEART,
+        GID_SPIKE_SWITCH,
+        GID_AREA_TILE,
+        GID_KEY,
+        GID_KEY_DOOR,
+        GID_MAP_CALC_INTEGRAL_BLOCK,
+        GID_MAP_CALC_DERIVATIVE_BLOCK,
+    }
+    | GID_ENEMIES
+    | GID_ENEMY_WALK_ALT
+    | GID_WALLS
+    | GID_DESTRUCTIBLE_WALLS
+    | GID_LEVEL_EXITS
+)
+
+# 編輯器 placeholder 色（無 Kenney 圖時）
+SEMANTIC_COLORS: dict[int, tuple[int, int, int]] = {
+    GID_SPAWN: (80, 200, 255),
+    GID_SPIKE: (200, 60, 60),
+    GID_HEART: (255, 100, 140),
+    GID_SPIKE_SWITCH: (180, 160, 60),
+    65834: (255, 100, 100),
+    65835: (255, 115, 105),
+    65837: (235, 95, 105),
+    65838: (245, 85, 95),
+    65840: (240, 90, 90),
+    65841: (235, 88, 92),
+    131449: (220, 80, 120),
+    131448: (210, 70, 110),
+    65850: (90, 85, 80),
+    65875: (70, 70, 75),
+    13142: (82, 78, 74),
+    131342: (82, 78, 74),
+    GID_AREA_TILE: (100, 200, 140),
+    13168: (170, 110, 70),
+    131368: (170, 110, 70),
+    65992: (255, 220, 80),
+    66019: (255, 200, 60),
+    GID_KEY: (230, 200, 80),
+    GID_KEY_DOOR: (120, 90, 50),
+    GID_MAP_CALC_INTEGRAL_BLOCK: (90, 140, 220),
+    GID_MAP_CALC_DERIVATIVE_BLOCK: (220, 140, 90),
+}
