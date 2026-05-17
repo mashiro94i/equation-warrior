@@ -13,12 +13,28 @@ from .assets import (
     draw_playing_cursor,
     get_ui_button_background,
 )
+from .background import draw_parallax_background
 from .brush import BrushManager
-from .calculus_blocks import CalculusBlock, resolve_calculus_block_interactions
+from .calculus_blocks import (
+    CalculusBlock,
+    add_calculus_block_with_limit,
+    resolve_algebra_block_interactions,
+    resolve_calculus_block_interactions,
+)
 from .constants import (
     AREA_THROW_RELEASE_MIN_DIST, AREA_THROW_RELEASE_SPEED_MULT,
-    BRUSH_MAX_TOTAL_LENGTH_PX, DERIVATIVE_BLOCKS_MAX, DOUBLE_B_AREA_MOVE_MS, FPS, GOLD,
-    INTEGRAL_BLOCKS_MAX, MAX_LEVEL, PINK,
+    BRUSH_MAX_TOTAL_LENGTH_PX,
+    CALC_DERIVATIVE_EVICT_OLDEST_WHEN_FULL,
+    CALC_INTEGRAL_EVICT_OLDEST_WHEN_FULL,
+    DERIVATIVE_BLOCKS_MAX,
+    DOUBLE_B_AREA_MOVE_MS,
+    FPS,
+    GOLD,
+    INTEGRAL_BLOCKS_MAX,
+    MAX_LEVEL,
+    PINK,
+    RED,
+    SQRT_BLOCKS_MAX, SQUARE_BLOCKS_MAX,
     SCREEN_HEIGHT, SCREEN_WIDTH, SCROLL_THRESH, SIGMA_CHARGE_MAX, SIGMA_CHARGE_STEP_MS,
     SIGMA_CHARGE_STEP_VALUE,
     TILE_SIZE,
@@ -34,10 +50,20 @@ from .interactions import (
     try_integral_xy_on_enemy_bullet,
     try_sigmoid_on_enemy_bullet,
 )
+from .calculus_blocks import count_player_placed_calculus
+from .level_modes import (
+    derivative_requires_world_unlock,
+    derivative_switch_key,
+    get_level_mode_config,
+)
 from .map_tile_loader import surface_for_gid
 from .mode_cooldowns import ModeCooldowns
 from .projectile import NumericProjectile
+from .enemy_archetypes import create_enemy
+from . import enemy_special
+from .enemy_special import blit_enemy_head_label
 from .soldier import Enemy, Player
+from .tile_animations import DERIVATIVE_UNLOCK_GIDS, UNDERWATER_AMBIENT_GIDS
 from .tile_types import GID_KEY
 from .ui import HealthBar, ScreenFade, TextButton
 from .world import Decoration, Exit, HealthBox, HeartPickup, KeyPickup, KenneyVisualTile, Water, World
@@ -56,6 +82,8 @@ def init_level(
     key_pickup_group,
     derivative_group,
     integral_group,
+    square_group,
+    sqrt_group,
     area_group,
     numeric_group,
     brush_manager,
@@ -72,6 +100,8 @@ def init_level(
         key_pickup_group,
         derivative_group,
         integral_group,
+        square_group,
+        sqrt_group,
         area_group,
         numeric_group,
     ):
@@ -95,16 +125,29 @@ def init_level(
         heart_group.add(HeartPickup(hx, hy, tid))
     for kx, ky, tid in world.key_pickups:
         key_pickup_group.add(KeyPickup(kx, ky, tid))
-    for vx, vy, vid in world.kenney_visual_tiles:
-        decoration_group.add(KenneyVisualTile(vx, vy, vid))
+    for vx, vy, vid, flip_x in world.kenney_visual_tiles:
+        decoration_group.add(KenneyVisualTile(vx, vy, vid, flip_x=flip_x))
     for ex, ey, egid in world.enemy_spawns:
-        enemy_group.add(Enemy(ex, ey, enemy_gid=egid))
+        enemy_group.add(create_enemy(ex, ey, egid))
     for cx, cy in world.calculus_derivative_spawns:
         derivative_group.add(CalculusBlock((cx, cy), "derivative", map_spawned=True))
     for cx, cy, axis in world.calculus_integral_spawns:
         integral_group.add(CalculusBlock((cx, cy), "integral", axis=axis, map_spawned=True))
     player = Player(*world.player_spawn)
     return world, player
+
+
+_LEVEL_CSV_WARMED: set[int] = set()
+
+
+def warm_level_csv(level: int) -> None:
+    """預先解析關卡 CSV 並暖 Kenney 貼圖快取，減少首次選關卡頓。"""
+    lv = int(level)
+    if lv in _LEVEL_CSV_WARMED:
+        return
+    w = World()
+    w.process_csv(lv)
+    _LEVEL_CSV_WARMED.add(lv)
 
 
 def main():
@@ -127,10 +170,38 @@ def main():
     view_x = (display_w - view_w) // 2
     view_y = (display_h - view_h) // 2
 
-    font_small = get_font(18, bold=True)
-    font_med = get_font(24, bold=True)
-    font_eq = get_font(22, bold=True)
     font_large = get_font(48, bold=True)
+    font_med = get_font(24, bold=True)
+
+    def present_screen() -> None:
+        window.fill((0, 0, 0))
+        scaled = pygame.transform.smoothscale(screen, (view_w, view_h))
+        window.blit(scaled, (view_x, view_y))
+        pygame.display.update()
+
+    def pump_boot_events() -> bool:
+        """處理啟動階段事件；QUIT 時回傳 False。"""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+        return True
+
+    def draw_menu_boot_frame(subtitle: str | None = None) -> bool:
+        screen.fill(SKY)
+        title = font_large.render("方程式戰士", True, WHITE)
+        screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 50)))
+        if subtitle:
+            sub = font_med.render(subtitle, True, WHITE)
+            screen.blit(sub, sub.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 30)))
+        present_screen()
+        return pump_boot_events()
+
+    if not draw_menu_boot_frame():
+        pygame.quit()
+        sys.exit()
+
+    font_small = get_font(18, bold=True)
+    font_eq = get_font(22, bold=True)
 
     projectile_group = pygame.sprite.Group()
     enemy_bullet_group = pygame.sprite.Group()
@@ -143,6 +214,8 @@ def main():
     key_pickup_group = pygame.sprite.Group()
     derivative_group = pygame.sprite.Group()
     integral_group = pygame.sprite.Group()
+    square_group = pygame.sprite.Group()
+    sqrt_group = pygame.sprite.Group()
     area_group = pygame.sprite.Group()
     numeric_group = pygame.sprite.Group()
 
@@ -158,29 +231,16 @@ def main():
     area_fling_mouse_end_my = 0.0
     area_drag_fling_anchor_mx = 0.0
     area_drag_fling_anchor_my = 0.0
+    player_flatten_until_ms = 0
+    player_crush_kill_at_ms = 0
 
     state = GameState.MENU
     level = 1
-    world, player = init_level(
-        level,
-        projectile_group,
-        enemy_bullet_group,
-        enemy_group,
-        water_group,
-        decoration_group,
-        exit_group,
-        health_box_group,
-        heart_group,
-        key_pickup_group,
-        derivative_group,
-        integral_group,
-        area_group,
-        numeric_group,
-        brush_manager,
-    )
-    health_bar = HealthBar(10, 10, player.max_health)
+    world = None
+    player = None
+    health_bar = None
+    controller = None
     last_spike_damage_ms = 0
-    controller = EquationController(player, projectile_group)
     eq_display = EquationDisplay(font_eq)
     opening_fade = ScreenFade(BLACK, 16)
     death_fade = ScreenFade(PINK, 14)
@@ -231,17 +291,29 @@ def main():
     pause_click_lock = False
     death_prompt_ready = False
     death_click_lock = False
+    if not draw_menu_boot_frame("載入資源…"):
+        pygame.quit()
+        sys.exit()
     game_audio.init_audio()
     game_audio.set_sfx_volume(sfx_volume)
     try:
-        pygame.mixer.music.set_volume(float(bgm_volume))
+        game_audio.set_bgm_volume(float(bgm_volume))
     except pygame.error:
         pass
+    if not draw_menu_boot_frame():
+        pygame.quit()
+        sys.exit()
+    for lv in range(1, MAX_LEVEL + 1):
+        if not draw_menu_boot_frame(f"預載關卡 {lv}…"):
+            pygame.quit()
+            sys.exit()
+        warm_level_csv(lv)
     resolution_options = [(1280, 720), (1366, 768), (1440, 810), (1600, 900), (1920, 1080)]
     selected_resolution = init_res
     menu_page = "main"
     guide_page_idx = 0
     menu_click_lock = False
+    level_preload_queue: list[int] = []
 
     def reset_area_drag():
         nonlocal area_drag_target, area_fling_mouse_end_mx, area_fling_mouse_end_my
@@ -265,7 +337,11 @@ def main():
         running = False
 
     def align_camera_to_world_x(world_x: int) -> None:
-        """依世界座標 X 調整捲動（復活前先對準重生點，再傳送玩家）。"""
+        """將鏡頭對準世界 X：捲動背景並把地圖與玩家一起換成螢幕座標系。
+
+        關卡載入時玩家仍在「世界 X」（CSV 像素）；走動捲屏時則維持在螢幕上。
+        此處須與 player.move 的捲動一致：shift_world 後玩家也要減去 delta。
+        """
         nonlocal background_scroll
         scroll_max = world.scroll_max_px(SCREEN_WIDTH)
         if scroll_max <= 0:
@@ -276,10 +352,23 @@ def main():
         delta = desired - background_scroll
         if delta != 0:
             shift_world(-delta)
+            player.rect.x -= delta
         background_scroll = desired
 
     def align_camera_to_player():
+        """開局／換關／重載後，讓玩家出現在螢幕上對應捲動位置。"""
         align_camera_to_world_x(player.rect.centerx)
+
+    def underwater_ambient_visible() -> bool:
+        view = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+        for deco in decoration_group:
+            if not isinstance(deco, KenneyVisualTile):
+                continue
+            if deco.source_gid not in UNDERWATER_AMBIENT_GIDS:
+                continue
+            if view.colliderect(deco.rect):
+                return True
+        return False
 
     def respawn_player_after_death():
         nonlocal state, death_prompt_ready, death_click_lock, is_left, is_right
@@ -290,8 +379,35 @@ def main():
         state = GameState.PLAYING
         is_left = is_right = False
 
+    def normalize_player_for_level():
+        cfg = get_level_mode_config(level)
+        player.heal_sigmoid_active = False
+        player.integral_only_lock = False
+        if not cfg.mode_allowed(player.game_mode):
+            player.game_mode = PlayerMode.FUNCTION
+        controller.force_idle()
+        brush_manager.end_stroke()
+        reset_area_drag()
+
     def switch_mode(new_mode: PlayerMode):
         nonlocal player
+        if getattr(player, "integral_only_lock", False) and new_mode != PlayerMode.INTEGRAL_BLOCK:
+            return
+        cfg = get_level_mode_config(level)
+        allowed = cfg.mode_allowed(new_mode)
+        if (
+            new_mode == PlayerMode.DERIVATIVE_BLOCK
+            and derivative_requires_world_unlock(level)
+            and not getattr(player, "derivative_round_unlocked", False)
+        ):
+            return
+        if (
+            new_mode == PlayerMode.DERIVATIVE_BLOCK
+            and derivative_requires_world_unlock(level)
+        ):
+            allowed = True
+        if not allowed:
+            return
         now_ms = pygame.time.get_ticks()
         if player.game_mode == new_mode:
             return
@@ -346,17 +462,29 @@ def main():
             return
         for _img, rect in world._wall_obstacles:
             rect.x += dx
+        for entry in world._animated_wall_entries:
+            entry["wx"] += dx
+            entry["rect"].x += dx
         for sp in world._spike_obstacles:
             sp["rect"].x += dx
         for _img, switch_rect in world._spike_switch_tiles:
             switch_rect.x += dx
         if world.respawn_point is not None:
             world.respawn_point = (world.respawn_point[0] + dx, world.respawn_point[1])
+        from .projectile import MathProjectile
+
         for g in (enemy_group, enemy_bullet_group, projectile_group, numeric_group,
-                  derivative_group, integral_group, area_group, water_group,
-                  decoration_group, exit_group, health_box_group, heart_group, key_pickup_group):
+                  derivative_group, integral_group, square_group, sqrt_group, area_group,
+                  water_group, decoration_group, exit_group, health_box_group,
+                  heart_group, key_pickup_group):
             for s in g:
-                if hasattr(s, "base_rect"):
+                if isinstance(s, MathProjectile):
+                    s.origin = (s.origin[0] + dx, s.origin[1])
+                    s.rect.x += dx
+                elif isinstance(s, KenneyVisualTile):
+                    s.world_x += dx
+                    s.rect.x += dx
+                elif hasattr(s, "base_rect"):
                     s.base_rect.x += dx
                     if hasattr(s, "shape_points") and s.shape_points:
                         s.shape_points = [(x + dx, y) for x, y in s.shape_points]
@@ -387,6 +515,8 @@ def main():
             key_pickup_group,
             derivative_group,
             integral_group,
+            square_group,
+            sqrt_group,
             area_group,
             numeric_group,
             brush_manager,
@@ -395,7 +525,9 @@ def main():
         health_bar = HealthBar(10, 10, player.max_health)
         controller = EquationController(player, projectile_group)
         sigma_schedule.clear()
+        game_audio.stop_bubble_repeat()
         last_spike_damage_ms = 0
+        normalize_player_for_level()
         align_camera_to_player()
 
     def begin_playing_at(selected_level: int):
@@ -403,6 +535,10 @@ def main():
         nonlocal is_opening, is_left, is_right, menu_page, menu_click_lock, background_scroll
         level = int(selected_level)
         background_scroll = 0
+        if not draw_menu_boot_frame(f"載入關卡 {level}…"):
+            pygame.quit()
+            sys.exit()
+        warm_level_csv(level)
         world, player = init_level(
             level,
             projectile_group,
@@ -416,6 +552,8 @@ def main():
             key_pickup_group,
             derivative_group,
             integral_group,
+            square_group,
+            sqrt_group,
             area_group,
             numeric_group,
             brush_manager,
@@ -424,7 +562,9 @@ def main():
         health_bar = HealthBar(10, 10, player.max_health)
         controller = EquationController(player, projectile_group)
         sigma_schedule.clear()
+        game_audio.stop_bubble_repeat()
         last_spike_damage_ms = 0
+        normalize_player_for_level()
         state = GameState.PLAYING
         game_audio.start_bgm_loop(bgm_volume)
         is_opening = True
@@ -434,8 +574,6 @@ def main():
         menu_click_lock = True
         align_camera_to_player()
 
-    align_camera_to_player()
-
     while running:
         clock.tick(FPS)
         if state == GameState.PLAYING and not is_paused:
@@ -443,7 +581,8 @@ def main():
         else:
             pygame.mouse.set_visible(True)
 
-        screen.fill(SKY)
+        if state != GameState.PLAYING:
+            screen.fill(SKY)
         now_ms = pygame.time.get_ticks()
 
         if state == GameState.MENU:
@@ -538,6 +677,10 @@ def main():
                 exit_btn.draw(screen)
                 if can_click and start_btn.rect.collidepoint(mpos):
                     menu_page = "level_select"
+                    level_preload_queue.clear()
+                    level_preload_queue.extend(
+                        lv for lv in range(1, MAX_LEVEL + 1) if lv not in _LEVEL_CSV_WARMED
+                    )
                     menu_click_lock = True
                 elif can_click and settings_btn.rect.collidepoint(mpos):
                     menu_page = "settings"
@@ -549,6 +692,8 @@ def main():
                 elif can_click and exit_btn.rect.collidepoint(mpos):
                     quit_game()
             elif menu_page == "level_select":
+                if level_preload_queue:
+                    warm_level_csv(level_preload_queue.pop(0))
                 title = font_large.render("方程式戰士", True, WHITE)
                 screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 120)))
                 sub = font_med.render("選擇關卡", True, WHITE)
@@ -618,7 +763,7 @@ def main():
                         sfx_volume = (mx - sfx_bar.x) / sfx_bar.w
                         game_audio.set_sfx_volume(sfx_volume)
                     try:
-                        pygame.mixer.music.set_volume(float(bgm_volume))
+                        game_audio.set_bgm_volume(float(bgm_volume))
                     except pygame.error:
                         pass
             else:
@@ -657,6 +802,7 @@ def main():
                     screen.blit(txt, txt.get_rect(center=(SCREEN_WIDTH // 2, 210 + idx * 48)))
 
         elif state == GameState.PLAYING and is_paused:
+            game_audio.set_underwater_bubbles_active(False)
             if pause_snapshot is None:
                 pause_snapshot = screen.copy()
             small = pygame.transform.smoothscale(pause_snapshot, (max(1, SCREEN_WIDTH // 8), max(1, SCREEN_HEIGHT // 8)))
@@ -737,15 +883,20 @@ def main():
                         sfx_volume = (mx - sfx_bar.x) / sfx_bar.w
                         game_audio.set_sfx_volume(sfx_volume)
                     try:
-                        pygame.mixer.music.set_volume(float(bgm_volume))
+                        game_audio.set_bgm_volume(float(bgm_volume))
                     except pygame.error:
                         pass
 
         elif state == GameState.PLAYING:
+            draw_parallax_background(screen, background_scroll)
+            world.update_animated_tiles(now_ms)
             world.draw_obstacles(screen)
             world.draw_spikes(screen)
             world.draw_spike_switches(screen)
             water_group.draw(screen)
+            for deco in decoration_group:
+                if isinstance(deco, KenneyVisualTile):
+                    deco.update_visual(now_ms)
             decoration_group.draw(screen)
             exit_group.draw(screen)
             health_box_group.draw(screen)
@@ -753,7 +904,13 @@ def main():
             key_pickup_group.draw(screen)
             if player.is_alive:
                 brush_manager.set_zone_center_x(player.rect.centerx)
-            if player.game_mode in (PlayerMode.DERIVATIVE_BLOCK, PlayerMode.INTEGRAL_BLOCK, PlayerMode.BRUSH):
+            if player.game_mode in (
+                PlayerMode.DERIVATIVE_BLOCK,
+                PlayerMode.INTEGRAL_BLOCK,
+                PlayerMode.SQUARE_BLOCK,
+                PlayerMode.SQRT_BLOCK,
+                PlayerMode.BRUSH,
+            ):
                 _zx, _zy, zone_w, zone_h = placement_zone_around_player(
                     player.rect.centerx, SCREEN_WIDTH, SCREEN_HEIGHT,
                 )
@@ -763,6 +920,26 @@ def main():
                 pygame.draw.rect(screen, (255, 255, 255), (_zx, _zy, zone_w, zone_h), 2)
 
             if player.is_alive:
+                if now_ms < player_flatten_until_ms:
+                    is_left = is_right = False
+                if player_crush_kill_at_ms and now_ms >= player_crush_kill_at_ms:
+                    player.health = 0.0
+                    player_crush_kill_at_ms = 0
+                for enemy in list(enemy_group):
+                    if enemy_special.try_exp_flyer_player_touch(player, enemy):
+                        game_audio.play_power_up(at_rect=player.rect)
+                        player.integral_only_lock = True
+                        player.game_mode = PlayerMode.INTEGRAL_BLOCK
+                        Player.show_center_notice(
+                            player,
+                            "你被詛咒了！只能使用積分模式",
+                            now_ms,
+                            duration_ms=3000,
+                        )
+                        controller.force_idle()
+                        brush_manager.end_stroke()
+                        reset_area_drag()
+                        break
                 screen_scroll = player.move(
                     is_left,
                     is_right,
@@ -774,6 +951,16 @@ def main():
                 if screen_scroll:
                     shift_world(screen_scroll)
                     background_scroll -= screen_scroll
+                scroll_max = world.scroll_max_px(SCREEN_WIDTH)
+                if background_scroll > scroll_max:
+                    excess = background_scroll - scroll_max
+                    shift_world(excess)
+                    player.rect.x -= excess
+                    background_scroll = scroll_max
+                elif background_scroll < 0:
+                    shift_world(background_scroll)
+                    player.rect.x -= background_scroll
+                    background_scroll = 0
                 if player.is_in_air:
                     player.update_action(ActionTypes.JUMP)
                 elif is_left or is_right:
@@ -783,8 +970,35 @@ def main():
                 if player.is_aiming:
                     player.is_x_flip = player.facing == -1
 
+            for deco in decoration_group:
+                if not isinstance(deco, KenneyVisualTile):
+                    continue
+                if deco.source_gid not in DERIVATIVE_UNLOCK_GIDS:
+                    continue
+                if player.rect.colliderect(deco.rect):
+                    if not player.derivative_round_unlocked:
+                        player.derivative_round_unlocked = True
+                        if derivative_requires_world_unlock(level):
+                            dkey = derivative_switch_key(level)
+                            dname = pygame.key.name(dkey).upper() if dkey is not None else "?"
+                            Player.show_center_notice(
+                                player,
+                                f"微分模式已解鎖！按 {dname}",
+                                now_ms,
+                                duration_ms=3000,
+                            )
+                    deco.kill()
+
             for enemy in enemy_group:
-                enemy.ai(player, world, enemy_bullet_group, area_group)
+                if getattr(enemy, "pending_crush_player", False):
+                    zone = enemy.rect.inflate(TILE_SIZE * 2, TILE_SIZE)
+                    if player.rect.colliderect(zone):
+                        player_flatten_until_ms = now_ms + 1500
+                        player_crush_kill_at_ms = now_ms + 2500
+                    enemy.pending_crush_player = False
+                enemy._nearby_derivative_blocks = tuple(derivative_group.sprites())
+                enemy._nearby_integral_blocks = tuple(integral_group.sprites())
+                enemy.ai(player, world, enemy_bullet_group, area_group, enemy_group)
                 enemy.update_cooldowns()
                 enemy.check_alive()
                 if (
@@ -811,6 +1025,8 @@ def main():
             controller.update(mouse_pos=game_mouse_pos())
             if getattr(player, "pop_sound_requests", 0) > 0:
                 player.pop_sound_requests = 0
+                if not game_audio.is_bubble_repeat_active():
+                    game_audio.play_bubble_pop(at_rect=player.rect)
 
             for proj in projectile_group:
                 proj.update(world, enemy_group, player, area_group)
@@ -824,6 +1040,12 @@ def main():
             for i in list(integral_group):
                 if i.alive():
                     i.update_physics(world, integral_group, derivative_group)
+            for s in list(square_group):
+                if s.alive():
+                    s.update_physics(world, square_group, sqrt_group)
+            for r in list(sqrt_group):
+                if r.alive():
+                    r.update_physics(world, sqrt_group, square_group)
 
             for d in list(derivative_group):
                 resolve_calculus_block_interactions(
@@ -847,6 +1069,10 @@ def main():
                     world,
                     projectile_group,
                 )
+            for s in list(square_group):
+                resolve_algebra_block_interactions(s, player, projectile_group, enemy_group)
+            for r in list(sqrt_group):
+                resolve_algebra_block_interactions(r, player, projectile_group, enemy_group)
 
             for pts, ci in brush_manager.drain_closed_loop_areas():
                 if len(pts) >= 3:
@@ -918,12 +1144,15 @@ def main():
                 numeric_group.add(
                     NumericProjectile((px, py), dxw / norm, dyw / norm, val),
                 )
-                if val == 0:
-                    player.request_pop_sound()
-                else:
-                    game_audio.play_shot()
+                if val != 0:
+                    game_audio.play_shot(at_rect=player.rect)
+            if not sigma_schedule and game_audio.is_bubble_repeat_active():
+                game_audio.stop_bubble_repeat()
 
-            if player.game_mode == PlayerMode.SIGMOID:
+            if (
+                get_level_mode_config(level).mode_allowed(PlayerMode.SIGMOID)
+                and player.game_mode == PlayerMode.SIGMOID
+            ):
                 mx, my = game_mouse_pos()
                 try_sigmoid_on_enemy_bullet(mx, my, enemy_bullet_group)
 
@@ -947,20 +1176,24 @@ def main():
                 world.try_consume_key_for_doors(player)
                 if world.spikes_extended:
                     spike_rects = world.spike_damage_rects()
-                    on_spike = any(
-                        player.rect.colliderect(sr) for sr in spike_rects
-                    )
+                    feet = player._feet_rect_for_spike()
+                    on_spike = any(feet.colliderect(sr) for sr in spike_rects)
                     if on_spike and now_ms - last_spike_damage_ms >= SPIKE_DAMAGE_INTERVAL_MS:
                         player.take_damage(player.max_health / 10.0)
+                        game_audio.play_spike_hit(at_rect=player.rect)
                         last_spike_damage_ms = now_ms
                     for enemy in enemy_group:
                         if not enemy.is_alive:
                             continue
                         if not enemy.feet_on_spike_damage(world):
                             continue
+                        if enemy_special.is_calc_tank_enemy(enemy):
+                            enemy_special.calc_tank_kill(enemy)
+                            continue
                         if now_ms - enemy._last_spike_damage_ms < SPIKE_DAMAGE_INTERVAL_MS:
                             continue
                         enemy.take_damage(max(enemy.max_health / 10.0, 1.0))
+                        game_audio.play_spike_hit(at_rect=enemy.rect)
                         enemy._last_spike_damage_ms = now_ms
                         enemy.check_alive()
 
@@ -982,6 +1215,8 @@ def main():
                         key_pickup_group,
                         derivative_group,
                         integral_group,
+                        square_group,
+                        sqrt_group,
                         area_group,
                         numeric_group,
                         brush_manager,
@@ -990,7 +1225,9 @@ def main():
                     health_bar = HealthBar(10, 10, player.max_health)
                     controller = EquationController(player, projectile_group)
                     sigma_schedule.clear()
+                    game_audio.stop_bubble_repeat()
                     last_spike_damage_ms = 0
+                    normalize_player_for_level()
                     is_opening = True
                     opening_fade.reset()
                     background_scroll = 0
@@ -1007,19 +1244,30 @@ def main():
             for enemy in enemy_group:
                 enemy.draw(screen)
                 if enemy.is_alive:
-                    hp_img = font_small.render(f"HP: {enemy.health:.2f}", True, WHITE)
-                    hp_rect = hp_img.get_rect(midbottom=(enemy.rect.centerx, enemy.rect.top - 6))
-                    bg = pygame.Surface((hp_rect.width + 8, hp_rect.height + 4), pygame.SRCALPHA)
-                    bg.fill((0, 0, 0, 140))
-                    screen.blit(bg, (hp_rect.x - 4, hp_rect.y - 2))
-                    screen.blit(hp_img, hp_rect)
-            player.draw(screen)
+                    blit_enemy_head_label(screen, font_small, enemy, WHITE)
+            if now_ms < player_flatten_until_ms:
+                flat = player.image.copy()
+                fw = max(4, int(flat.get_width()))
+                fh = max(2, int(flat.get_height() * 0.22))
+                flat = pygame.transform.smoothscale(flat, (fw, fh))
+                fr = flat.get_rect(midbottom=player.rect.midbottom)
+                screen.blit(flat, fr)
+            else:
+                player.draw(screen)
+            if player.heal_sigmoid_active:
+                s_head = font_med.render("S", True, RED)
+                screen.blit(
+                    s_head,
+                    s_head.get_rect(midbottom=(player.rect.centerx, player.rect.top - 4)),
+                )
             enemy_bullet_group.draw(screen)
             projectile_group.draw(screen)
             numeric_group.draw(screen)
             area_group.draw(screen)
             derivative_group.draw(screen)
             integral_group.draw(screen)
+            square_group.draw(screen)
+            sqrt_group.draw(screen)
 
             controller.draw_preview(screen, world)
 
@@ -1039,22 +1287,50 @@ def main():
                 font_small.render(f"鑰匙 × {player.key_count}", True, BLACK),
                 (36, 80),
             )
-            cd_lines = [
-                (PlayerMode.FUNCTION, "1:f(x)"),
-                (PlayerMode.DERIVATIVE_BLOCK, "2:d/dx"),
-                (PlayerMode.INTEGRAL_BLOCK, "3:∫"),
-                (PlayerMode.SIGMOID, "4:S"),
-                (PlayerMode.SIGMA, "5:Σ"),
-            ]
+            lvl_cfg_hud = get_level_mode_config(level)
+            cd_lines = list(lvl_cfg_hud.cooldown_hud)
+            hud_y = 102
             for idx, (mode, label) in enumerate(cd_lines):
                 total_ms = mode_cd.total_ms(mode)
                 rem_ms = mode_cd.remaining_ms(mode, now_ms)
                 txt = f"{label} CD {rem_ms / 1000:.1f}s/{total_ms / 1000:.1f}s"
-                screen.blit(font_small.render(txt, True, BLACK), (10, 102 + idx * 20))
+                locked = bool(getattr(player, "integral_only_lock", False)) and mode != PlayerMode.INTEGRAL_BLOCK
+                if (
+                    mode == PlayerMode.DERIVATIVE_BLOCK
+                    and derivative_requires_world_unlock(level)
+                    and not getattr(player, "derivative_round_unlocked", False)
+                ):
+                    locked = True
+                if locked:
+                    txt = f"{txt} ×"
+                color = (200, 60, 60) if locked else BLACK
+                screen.blit(font_small.render(txt, True, color), (10, hud_y + idx * 20))
+            hud_y += len(cd_lines) * 20
+            if (
+                derivative_requires_world_unlock(level)
+                and getattr(player, "derivative_round_unlocked", False)
+            ):
+                dkey = derivative_switch_key(level)
+                dname = pygame.key.name(dkey).upper() if dkey is not None else "?"
+                screen.blit(
+                    font_small.render(f"微分已解鎖 [{dname}]", True, (40, 180, 80)),
+                    (10, hud_y),
+                )
+                hud_y += 20
 
-            controller.draw_cubic_msg(screen, font_med)
+            controller.draw_polynomial_center_msg(screen, font_med)
+            if int(getattr(player, "center_notice_until_ms", 0)) > now_ms:
+                notice = font_med.render(str(player.center_notice_text), True, YELLOW)
+                nr = notice.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 100))
+                nb = pygame.Surface((nr.width + 24, nr.height + 10), pygame.SRCALPHA)
+                nb.fill((0, 0, 0, 190))
+                screen.blit(nb, (nr.x - 12, nr.y - 5))
+                screen.blit(notice, nr)
 
-            if player.game_mode == PlayerMode.SIGMOID:
+            if (
+                get_level_mode_config(level).mode_allowed(PlayerMode.SIGMOID)
+                and player.game_mode == PlayerMode.SIGMOID
+            ):
                 mx, my = game_mouse_pos()
                 s_txt = font_large.render("S", True, GOLD)
                 screen.blit(s_txt, s_txt.get_rect(center=(mx, my)))
@@ -1069,6 +1345,14 @@ def main():
                 mx, my = game_mouse_pos()
                 int_txt = font_med.render(f"∫{player.integral_axis.value}", True, YELLOW)
                 screen.blit(int_txt, int_txt.get_rect(center=(mx, my)))
+            elif player.game_mode == PlayerMode.SQUARE_BLOCK:
+                mx, my = game_mouse_pos()
+                sq_txt = font_med.render("x²", True, YELLOW)
+                screen.blit(sq_txt, sq_txt.get_rect(center=(mx, my)))
+            elif player.game_mode == PlayerMode.SQRT_BLOCK:
+                mx, my = game_mouse_pos()
+                rt_txt = font_med.render("√x", True, YELLOW)
+                screen.blit(rt_txt, rt_txt.get_rect(center=(mx, my)))
             elif player.game_mode == PlayerMode.SIGMA:
                 mx, my = game_mouse_pos()
                 sigma_txt = font_med.render("Σx", True, YELLOW)
@@ -1083,11 +1367,14 @@ def main():
             if player.game_mode == PlayerMode.FUNCTION:
                 mode_msg = f"函數模式：目前次方 {player.polynomial_degree}"
             elif player.game_mode == PlayerMode.DERIVATIVE_BLOCK:
-                mode_msg = f"微分模式：d/dx 塊 {len(derivative_group)}/{DERIVATIVE_BLOCKS_MAX}"
+                mode_msg = (
+                    f"微分模式：d/dx 塊 "
+                    f"{count_player_placed_calculus(derivative_group)}/{DERIVATIVE_BLOCKS_MAX}"
+                )
             elif player.game_mode == PlayerMode.INTEGRAL_BLOCK:
                 mode_msg = (
                     f"積分模式：∫{player.integral_axis.value} | 積分塊 "
-                    f"{len(integral_group)}/{INTEGRAL_BLOCKS_MAX}"
+                    f"{count_player_placed_calculus(integral_group)}/{INTEGRAL_BLOCKS_MAX}"
                 )
             elif player.game_mode == PlayerMode.SIGMOID:
                 mode_msg = "S 模式：游標碰到敵彈會轉綠並變治療彈"
@@ -1099,6 +1386,12 @@ def main():
                 mode_msg = f"畫筆：剩餘可畫長度 {remain}"
             elif player.game_mode == PlayerMode.AREA_MOVE:
                 mode_msg = "面積拖曳：左鍵拖移；快放左鍵且位移夠大時甩出"
+            elif player.game_mode == PlayerMode.SQUARE_BLOCK:
+                mode_msg = f"平方模式：x² 塊 {len(square_group)}/{SQUARE_BLOCKS_MAX}"
+            elif player.game_mode == PlayerMode.SQRT_BLOCK:
+                mode_msg = f"根號模式：√x 塊 {len(sqrt_group)}/{SQRT_BLOCKS_MAX}"
+            if player.heal_sigmoid_active:
+                mode_msg = (mode_msg + "｜治療 S：攻擊回復敵人 1 HP") if mode_msg else "治療 S：攻擊回復敵人 1 HP"
             mode_img = font_small.render(mode_msg, True, WHITE)
             screen.blit(mode_img, mode_img.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 18)))
 
@@ -1108,16 +1401,20 @@ def main():
                 death_fade.reset()
                 death_prompt_ready = False
                 death_click_lock = True
-                game_audio.play_player_death()
+                game_audio.stop_all_sfx()
+                game_audio.play_player_death(at_rect=player.rect)
 
             if is_opening:
                 if opening_fade.fade_in(screen):
                     is_opening = False
 
+            game_audio.set_underwater_bubbles_active(underwater_ambient_visible())
             draw_control_hint_strip(screen)
             draw_playing_cursor(screen, game_mouse_pos())
 
         elif state == GameState.DEATH:
+            game_audio.set_underwater_bubbles_active(False)
+            draw_parallax_background(screen, background_scroll)
             world.draw_obstacles(screen)
             world.draw_spikes(screen)
             world.draw_spike_switches(screen)
@@ -1125,7 +1422,15 @@ def main():
             heart_group.draw(screen)
             for enemy in enemy_group:
                 enemy.draw(screen)
-            player.draw(screen)
+            if now_ms < player_flatten_until_ms:
+                flat = player.image.copy()
+                fw = max(4, int(flat.get_width()))
+                fh = max(2, int(flat.get_height() * 0.22))
+                flat = pygame.transform.smoothscale(flat, (fw, fh))
+                fr = flat.get_rect(midbottom=player.rect.midbottom)
+                screen.blit(flat, fr)
+            else:
+                player.draw(screen)
             health_bar.draw(screen, 0)
             done = death_fade.fade_out(screen)
             if done:
@@ -1151,6 +1456,8 @@ def main():
                 state = GameState.MENU
 
         for event in pygame.event.get():
+            if event.type == game_audio.BGM_END_EVENT:
+                game_audio.handle_bgm_end_event()
             if event.type == pygame.QUIT:
                 quit_game()
             if state == GameState.DEATH and death_prompt_ready:
@@ -1181,6 +1488,7 @@ def main():
                         pause_snapshot = None
                     else:
                         is_paused = True
+                        game_audio.stop_all_sfx()
                         pause_page = "main"
                         pause_snapshot = screen.copy()
                         is_left = is_right = False
@@ -1203,24 +1511,52 @@ def main():
                     elif event.key == pygame.K_w:
                         if not player.is_in_air:
                             player.is_jump = True
-                    elif event.key == pygame.K_1:
-                        switch_mode(PlayerMode.FUNCTION)
-                        controller.on_keydown(event.key)
-                    elif event.key == pygame.K_2:
-                        switch_mode(PlayerMode.DERIVATIVE_BLOCK)
-                    elif event.key == pygame.K_3:
-                        switch_mode(PlayerMode.INTEGRAL_BLOCK)
-                    elif event.key == pygame.K_4:
-                        switch_mode(PlayerMode.SIGMOID)
-                    elif event.key == pygame.K_5:
-                        switch_mode(PlayerMode.SIGMA)
-                    elif event.key == pygame.K_b:
-                        t_b = pygame.time.get_ticks()
-                        if t_b - last_b_key_ms <= DOUBLE_B_AREA_MOVE_MS:
-                            switch_mode(PlayerMode.AREA_MOVE)
-                        else:
-                            switch_mode(PlayerMode.BRUSH)
-                        last_b_key_ms = t_b
+                    else:
+                        lvl_cfg = get_level_mode_config(level)
+                        if getattr(player, "integral_only_lock", False):
+                            if event.key in lvl_cfg.key_to_mode:
+                                new_mode = lvl_cfg.key_to_mode[event.key]
+                                if new_mode == PlayerMode.INTEGRAL_BLOCK:
+                                    switch_mode(new_mode)
+                        elif (
+                            derivative_requires_world_unlock(level)
+                            and getattr(player, "derivative_round_unlocked", False)
+                            and event.key == derivative_switch_key(level)
+                        ):
+                            switch_mode(PlayerMode.DERIVATIVE_BLOCK)
+                        elif event.key in lvl_cfg.key_to_mode:
+                            new_mode = lvl_cfg.key_to_mode[event.key]
+                            switch_mode(new_mode)
+                            if new_mode == PlayerMode.FUNCTION:
+                                controller.on_keydown(event.key)
+                        elif (
+                            lvl_cfg.toggle_heal_sigmoid_key is not None
+                            and event.key == lvl_cfg.toggle_heal_sigmoid_key
+                        ):
+                            player.heal_sigmoid_active = not player.heal_sigmoid_active
+                            game_audio.play_power_up(at_rect=player.rect)
+                            if player.heal_sigmoid_active:
+                                Player.show_center_notice(
+                                    player, "Sigmoid 治療模式", now_ms, duration_ms=2500,
+                                )
+                            else:
+                                Player.show_center_notice(
+                                    player, "一般模式", now_ms, duration_ms=2500,
+                                )
+                        elif (
+                            not getattr(player, "integral_only_lock", False)
+                            and event.key == pygame.K_b
+                            and lvl_cfg.allow_brush_b
+                        ):
+                            t_b = pygame.time.get_ticks()
+                            if (
+                                lvl_cfg.allow_double_b_area
+                                and t_b - last_b_key_ms <= DOUBLE_B_AREA_MOVE_MS
+                            ):
+                                switch_mode(PlayerMode.AREA_MOVE)
+                            else:
+                                switch_mode(PlayerMode.BRUSH)
+                            last_b_key_ms = t_b
                 if event.type == pygame.KEYUP:
                     if event.key == pygame.K_a:
                         is_left = False
@@ -1229,7 +1565,10 @@ def main():
                     elif event.key == pygame.K_1:
                         controller.on_keyup(event.key)
                 if event.type == pygame.MOUSEWHEEL:
-                    if player.game_mode == PlayerMode.INTEGRAL_BLOCK:
+                    if (
+                        get_level_mode_config(level).mode_allowed(PlayerMode.INTEGRAL_BLOCK)
+                        and player.game_mode == PlayerMode.INTEGRAL_BLOCK
+                    ):
                         if player.integral_axis == IntegralAxis.X:
                             player.integral_axis = IntegralAxis.Y
                         else:
@@ -1242,11 +1581,15 @@ def main():
                         if point_in_placement_zone(
                             mx, my, player.rect.centerx, SCREEN_WIDTH, SCREEN_HEIGHT,
                         ):
-                            if len(derivative_group) >= DERIVATIVE_BLOCKS_MAX:
-                                oldest = derivative_group.sprites()[0]
-                                oldest.kill()
-                            derivative_group.add(CalculusBlock((mx, my), "derivative"))
-                            game_audio.play_calculus_place()
+                            if add_calculus_block_with_limit(
+                                derivative_group,
+                                CalculusBlock((mx, my), "derivative"),
+                                DERIVATIVE_BLOCKS_MAX,
+                                evict_oldest=CALC_DERIVATIVE_EVICT_OLDEST_WHEN_FULL,
+                            ):
+                                game_audio.play_calculus_place(
+                                    at_rect=pygame.Rect(mx, my, TILE_SIZE, TILE_SIZE),
+                                )
                     elif player.game_mode == PlayerMode.INTEGRAL_BLOCK:
                         acted = try_integral_xy_on_enemy_bullet(
                             mx, my, player.integral_axis, enemy_bullet_group,
@@ -1258,16 +1601,41 @@ def main():
                         if not acted and point_in_placement_zone(
                             mx, my, player.rect.centerx, SCREEN_WIDTH, SCREEN_HEIGHT,
                         ):
-                            if len(integral_group) >= INTEGRAL_BLOCKS_MAX:
-                                integral_group.sprites()[0].kill()
-                            integral_group.add(
-                                CalculusBlock((mx, my), "integral", axis=player.integral_axis.value),
-                            )
-                            game_audio.play_calculus_place()
+                            if add_calculus_block_with_limit(
+                                integral_group,
+                                CalculusBlock(
+                                    (mx, my), "integral", axis=player.integral_axis.value,
+                                ),
+                                INTEGRAL_BLOCKS_MAX,
+                                evict_oldest=CALC_INTEGRAL_EVICT_OLDEST_WHEN_FULL,
+                            ):
+                                game_audio.play_calculus_place(
+                                    at_rect=pygame.Rect(mx, my, TILE_SIZE, TILE_SIZE),
+                                )
                     elif player.game_mode == PlayerMode.INTEGRAL_XY:
                         if not try_integral_xy_on_enemy_bullet(mx, my, player.integral_axis, enemy_bullet_group):
                             try_integral_xy_on_brush(
                                 mx, my, player.integral_axis, player, brush_manager, area_group, world,
+                            )
+                    elif player.game_mode == PlayerMode.SQUARE_BLOCK:
+                        if point_in_placement_zone(
+                            mx, my, player.rect.centerx, SCREEN_WIDTH, SCREEN_HEIGHT,
+                        ):
+                            if len(square_group) >= SQUARE_BLOCKS_MAX:
+                                square_group.sprites()[0].kill()
+                            square_group.add(CalculusBlock((mx, my), "square"))
+                            game_audio.play_calculus_place(
+                                at_rect=pygame.Rect(mx, my, TILE_SIZE, TILE_SIZE),
+                            )
+                    elif player.game_mode == PlayerMode.SQRT_BLOCK:
+                        if point_in_placement_zone(
+                            mx, my, player.rect.centerx, SCREEN_WIDTH, SCREEN_HEIGHT,
+                        ):
+                            if len(sqrt_group) >= SQRT_BLOCKS_MAX:
+                                sqrt_group.sprites()[0].kill()
+                            sqrt_group.add(CalculusBlock((mx, my), "sqrt"))
+                            game_audio.play_calculus_place(
+                                at_rect=pygame.Rect(mx, my, TILE_SIZE, TILE_SIZE),
                             )
                     elif player.game_mode == PlayerMode.SIGMOID:
                         try_sigmoid_on_enemy_bullet(mx, my, enemy_bullet_group)
@@ -1314,6 +1682,8 @@ def main():
                                 SIGMA_ZERO_BURST_COUNT,
                             ),
                         )
+                        if n == 0:
+                            game_audio.start_bubble_repeat(at_rect=player.rect)
                         sigma_mouse_down_ms = None
                     brush_manager.end_stroke()
                 elif event.type == pygame.MOUSEMOTION:

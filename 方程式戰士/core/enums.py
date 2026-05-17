@@ -38,10 +38,12 @@ class PlayerMode(Enum):
     DERIVATIVE_BLOCK = "d_block"    # 微分塊
     INTEGRAL_BLOCK = "int_block"    # 積分塊
     INTEGRAL_XY = "int_xy"          # ∫x/∫y 對敵彈／畫筆
-    SIGMOID = "sigmoid"             # S 型點敵彈
+    SIGMOID = "sigmoid"             # S 型點敵彈（舊）
     SIGMA = "sigma"                 # Σ 蓄力數字彈
     BRUSH = "brush"                 # 畫筆
     AREA_MOVE = "area_move"         # 連按兩次 B：拖曳靜止面積（不可壓進地圖）
+    SQUARE_BLOCK = "square_block"   # x² 塊（關卡 3）
+    SQRT_BLOCK = "sqrt_block"       # √x 塊（關卡 3）
 
 
 class IntegralAxis(Enum):

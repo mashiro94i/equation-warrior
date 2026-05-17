@@ -27,12 +27,13 @@ SCROLL_THRESH = max(120, int(200 * SCREEN_WIDTH / 800))
 # 與 map_editor 一致：CSV 內 >= 此值視為 Kenney 等自訂圖塊（主遊戲以佔位障礙顯示）
 KENNEY_TILE_BASE = 256
 
-# 地刺：踩住每秒扣最大血量 1/10
+# 地刺：踩住每秒扣最大血量 1/10；傷害／顯示區為格底向上約 0.7 格高
 SPIKE_DAMAGE_INTERVAL_MS = 1000
+SPIKE_DAMAGE_HEIGHT_FRAC = 0.7
 
 # ========== 玩家／平衡（規格 v3）==========
 # 血量：調整玩家／敵人強度請改此處；Enemy(x,y,max_hp=…) 可覆寫單體血量
-PLAYER_MAX_HP = 10000000000.0
+PLAYER_MAX_HP = 200.0
 ENEMY_DEFAULT_MAX_HP = 100.0
 
 HP_DECIMAL_PLACES = 2
@@ -52,8 +53,17 @@ CALC_BLOCK_W = 44
 CALC_BLOCK_H = 28
 CALC_BLOCK_INTEGRAL_H = CALC_BLOCK_H * 3
 CALC_BLOCK_GRAVITY = 0.55
-DERIVATIVE_BLOCKS_MAX = 5
-INTEGRAL_BLOCKS_MAX = 5
+DERIVATIVE_BLOCKS_MAX = 1
+INTEGRAL_BLOCKS_MAX = 3
+# 達上限時是否自動刪除最舊的一塊以容納新塊；False = 達上限則無法再放置
+CALC_DERIVATIVE_EVICT_OLDEST_WHEN_FULL = False
+CALC_INTEGRAL_EVICT_OLDEST_WHEN_FULL = True
+SQUARE_BLOCKS_MAX = 3
+SQRT_BLOCKS_MAX = 3
+SQUARE_SPLIT_ANGLE_DEG = 15
+
+# 關卡 3：治療 Sigmoid（切換後攻擊改為回復敵人）
+HEAL_SIGMOID_HEAL_AMOUNT = 1.0
 
 # 積分塊碰到我方方程式子彈：視覺與傷害倍率（僅第一次生效）
 INTEGRAL_HIT_BULLET_RADIUS_MULT = 1.85
@@ -106,7 +116,7 @@ PLAYER_PROJECTILE_DAMAGE = 25
 PLAYER_ATTACK_POWER_MULT = 1.0
 
 # 敵彈命中玩家時扣血（Sigmoid 互動亦用此值估算治療）
-ENEMY_BULLET_DAMAGE = 100.0
+ENEMY_BULLET_DAMAGE = 10.0
 # 65834 等近戰怪碰玩家扣血（間隔避免每幀連刷）；傷害預設與敵彈相同
 ENEMY_MELEE_CONTACT_INTERVAL_MS = 550
 

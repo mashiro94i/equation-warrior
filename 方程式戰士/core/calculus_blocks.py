@@ -1,4 +1,6 @@
-"""下落微分／積分符號塊"""
+"""下落微分／積分／平方／根號符號塊"""
+import math
+
 import pygame
 
 from .area_entity import (
@@ -8,10 +10,11 @@ from .area_entity import (
 )
 from .constants import (
     CALC_BLOCK_GRAVITY, CALC_BLOCK_H, CALC_BLOCK_INTEGRAL_H, CALC_BLOCK_W,
-    INTEGRAL_XY_EXTEND_MAX_PX,
+    INTEGRAL_XY_EXTEND_MAX_PX, SQUARE_SPLIT_ANGLE_DEG,
     SCREEN_HEIGHT, SCREEN_WIDTH, WHITE,
 )
 from . import game_audio
+from .enums import PowerType
 from .projectile import MathProjectile
 from .fonts import get_font
 
@@ -36,7 +39,7 @@ def _integral_block_smashes_player(block, player) -> bool:
 
 
 class CalculusBlock(pygame.sprite.Sprite):
-    """kind: 'derivative' | 'integral'"""
+    """kind: 'derivative' | 'integral' | 'square' | 'sqrt'"""
 
     def __init__(self, center_xy, kind: str, axis: str = "y", *, map_spawned: bool = False):
         super().__init__()
@@ -49,7 +52,10 @@ class CalculusBlock(pygame.sprite.Sprite):
         self.rect = self.image.get_rect(center=center_xy)
 
     def _build_image(self):
-        h = CALC_BLOCK_H if self.kind == "derivative" else CALC_BLOCK_INTEGRAL_H
+        if self.kind == "integral":
+            h = CALC_BLOCK_INTEGRAL_H
+        else:
+            h = CALC_BLOCK_H
         surf = pygame.Surface((CALC_BLOCK_W, h), pygame.SRCALPHA)
         surf.fill((40, 40, 50, 230))
         pygame.draw.rect(surf, WHITE, surf.get_rect(), 2)
@@ -61,6 +67,14 @@ class CalculusBlock(pygame.sprite.Sprite):
             surf.blit(num, num.get_rect(center=(cx, 9)))
             pygame.draw.line(surf, WHITE, (cx - 10, 13), (cx + 10, 13), 2)
             surf.blit(den, den.get_rect(center=(cx, 20)))
+        elif self.kind == "square":
+            font = get_font(20, bold=True)
+            txt = font.render("x²", True, WHITE)
+            surf.blit(txt, txt.get_rect(center=(CALC_BLOCK_W // 2, h // 2)))
+        elif self.kind == "sqrt":
+            font = get_font(20, bold=True)
+            txt = font.render("√x", True, WHITE)
+            surf.blit(txt, txt.get_rect(center=(CALC_BLOCK_W // 2, h // 2)))
         else:
             font = get_font(22, bold=True)
             label = "∫x" if self.axis == "x" else "∫y"
@@ -110,11 +124,41 @@ class CalculusBlock(pygame.sprite.Sprite):
             if self.rect.colliderect(other.rect):
                 self.kill()
                 other.kill()
-                game_audio.play_calculus_effect()
+                game_audio.play_calculus_effect(at_rect=self.rect)
                 return
 
         if self.rect.top > SCREEN_HEIGHT + 40:
             self.kill()
+
+
+def count_player_placed_calculus(group: pygame.sprite.Group) -> int:
+    """只計玩家放置的塊；地圖內建塊不佔上限。"""
+    return sum(
+        1 for s in group.sprites() if not getattr(s, "_map_spawned", False)
+    )
+
+
+def add_calculus_block_with_limit(
+    group: pygame.sprite.Group,
+    block: CalculusBlock,
+    max_count: int,
+    *,
+    evict_oldest: bool,
+) -> bool:
+    """加入微積分塊；達上限時依設定移除最舊的玩家放置塊。回傳是否成功加入。"""
+    if getattr(block, "_map_spawned", False):
+        group.add(block)
+        return True
+    player_placed = [
+        s for s in group.sprites() if not getattr(s, "_map_spawned", False)
+    ]
+    if len(player_placed) >= max_count:
+        if not evict_oldest:
+            return False
+        if player_placed:
+            player_placed[0].kill()
+    group.add(block)
+    return True
 
 
 def resolve_calculus_block_interactions(
@@ -128,7 +172,7 @@ def resolve_calculus_block_interactions(
     projectile_group: pygame.sprite.Group = None,
 ):
     """碰玩家／敵人／敵彈／畫筆後塊消失（邊界仍觸發）"""
-    if not block.alive():
+    if not block.alive() or block.kind in ("square", "sqrt"):
         return
 
     if projectile_group is not None:
@@ -138,12 +182,12 @@ def resolve_calculus_block_interactions(
             if block.kind == "integral" and isinstance(proj, MathProjectile):
                 proj.apply_integral_enlarge()
                 block.kill()
-                game_audio.play_calculus_effect()
+                game_audio.play_calculus_effect(at_rect=block.rect)
                 return
             if block.kind == "derivative":
                 proj.kill()
                 block.kill()
-                game_audio.play_calculus_effect()
+                game_audio.play_calculus_effect(at_rect=block.rect)
                 return
 
     if block.rect.colliderect(player.rect):
@@ -154,17 +198,23 @@ def resolve_calculus_block_interactions(
             if _integral_block_smashes_player(block, player):
                 player.take_damage(player.health * 0.5)
         block.kill()
-        game_audio.play_calculus_effect()
+        game_audio.play_calculus_effect(at_rect=block.rect)
         return
 
     for enemy in list(enemy_group):
         if enemy.is_alive and block.rect.colliderect(enemy.rect):
+            from .enemy_special import on_calculus_block_hit
+
+            if on_calculus_block_hit(enemy, block.kind):
+                block.kill()
+                game_audio.play_calculus_effect(at_rect=block.rect)
+                return
             if block.kind == "derivative":
                 enemy.calc_frozen = True
             else:
                 enemy.calc_frozen = False
             block.kill()
-            game_audio.play_calculus_effect()
+            game_audio.play_calculus_effect(at_rect=block.rect)
             return
 
     if block.kind == "derivative":
@@ -172,14 +222,14 @@ def resolve_calculus_block_interactions(
             if bullet.alive() and block.rect.colliderect(bullet.collision_rect()):
                 bullet.kill()
                 block.kill()
-                game_audio.play_calculus_effect()
+                game_audio.play_calculus_effect(at_rect=block.rect)
                 return
     else:
         for bullet in list(enemy_bullet_group):
             if bullet.alive() and block.rect.colliderect(bullet.collision_rect()):
                 bullet.apply_integral_enlarge()
                 block.kill()
-                game_audio.play_calculus_effect()
+                game_audio.play_calculus_effect(at_rect=block.rect)
                 return
 
     for stroke in list(brush_manager.strokes):
@@ -230,7 +280,7 @@ def resolve_calculus_block_interactions(
                     area_group.add(body)
             brush_manager.remove_stroke(stroke)
             block.kill()
-            game_audio.play_calculus_effect()
+            game_audio.play_calculus_effect(at_rect=block.rect)
             return
 
     for area in list(area_group):
@@ -243,9 +293,69 @@ def resolve_calculus_block_interactions(
                 brush_manager.add_stroke_from_points(area.source_points, area.source_color_index)
             area.kill()
             block.kill()
-            game_audio.play_calculus_effect()
+            game_audio.play_calculus_effect(at_rect=block.rect)
             return
         if block.kind == "integral":
             area.apply_push_from_direction(0.0, 1.0)
-            game_audio.play_calculus_effect()
+            game_audio.play_calculus_effect(at_rect=block.rect)
             return
+
+
+def spawn_square_split_projectiles(projectile_group, origin, base_angle_rad: float, player) -> None:
+    """平方塊被彈命中：沿原彈道左右各 15° 各射一枚直線彈。"""
+    healing = bool(getattr(player, "heal_sigmoid_active", False))
+    for delta_deg in (-SQUARE_SPLIT_ANGLE_DEG, SQUARE_SPLIT_ANGLE_DEG):
+        ang = base_angle_rad + math.radians(delta_deg)
+        dx, dy = math.cos(ang), math.sin(ang)
+        norm = math.hypot(dx, dy) or 1.0
+        direction = (dx / norm, dy / norm)
+        proj = MathProjectile(
+            origin=origin,
+            power=PowerType.LINEAR,
+            params={},
+            facing=1 if dx >= 0 else -1,
+            direction=direction,
+            healing_shot=healing,
+        )
+        projectile_group.add(proj)
+
+
+def resolve_algebra_block_interactions(
+    block: CalculusBlock,
+    player,
+    projectile_group: pygame.sprite.Group,
+    enemy_group: pygame.sprite.Group | None = None,
+):
+    """平方／根號塊：僅處理與我方子彈的互動。"""
+    if block.kind not in ("square", "sqrt") or not block.alive():
+        return
+    if enemy_group is not None:
+        for enemy in list(enemy_group):
+            if enemy.is_alive and block.rect.colliderect(enemy.rect):
+                from .enemy_special import on_calculus_block_hit
+
+                kind = "square" if block.kind == "square" else "sqrt"
+                if on_calculus_block_hit(enemy, kind):
+                    block.kill()
+                    game_audio.play_calculus_effect(at_rect=block.rect)
+                    return
+    if projectile_group is None:
+        return
+    for proj in list(projectile_group):
+        if not proj.alive() or not isinstance(proj, MathProjectile):
+            continue
+        if not block.rect.colliderect(proj.rect):
+            continue
+        origin = proj.rect.center
+        if block.kind == "square":
+            spawn_square_split_projectiles(
+                projectile_group, origin, proj.travel_angle_rad(), player,
+            )
+            proj.kill()
+            block.kill()
+            game_audio.play_calculus_effect(at_rect=block.rect)
+            return
+        proj.kill()
+        block.kill()
+        game_audio.play_calculus_effect(at_rect=block.rect)
+        return

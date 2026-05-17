@@ -32,7 +32,7 @@ def try_integral_xy_on_enemy_bullet(mx: int, my: int, axis: IntegralAxis, enemy_
     for bullet in list(enemy_bullet_group):
         if bullet.collision_rect().collidepoint(mx, my):
             bullet.apply_integral_extend(axis, step)
-            game_audio.play_calculus_effect()
+            game_audio.play_calculus_effect(at_rect=bullet.rect)
             return True
     return False
 
@@ -65,7 +65,7 @@ def try_integral_xy_on_brush(
             area_group.add(body)
         brush_manager.remove_stroke(stroke)
         if bodies:
-            game_audio.play_calculus_effect()
+            game_audio.play_calculus_effect(at_rect=bodies[0].rect)
         return len(bodies) > 0
     if stroke.is_closed_loop():
         poly = stroke.integral_area_polygon(axis.value, float(mx), extend)
@@ -93,5 +93,5 @@ def try_integral_xy_on_brush(
         area_group.add(body)
     brush_manager.remove_stroke(stroke)
     if bodies:
-        game_audio.play_calculus_effect()
+        game_audio.play_calculus_effect(at_rect=bodies[0].rect)
     return len(bodies) > 0

@@ -449,6 +449,7 @@ class TestTileTypes(unittest.TestCase):
         self.assertEqual(classify_tile(65850), "wall")
         self.assertEqual(classify_tile(13142), "wall")
         self.assertEqual(classify_tile(131342), "wall")
+        self.assertEqual(classify_tile(131356), "wall")
         self.assertEqual(classify_tile(GID_AREA_TILE), "area_tile")
         self.assertEqual(classify_tile(13168), "destructible_wall")
         self.assertEqual(classify_tile(65992), "level_exit")

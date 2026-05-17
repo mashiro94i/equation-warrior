@@ -30,12 +30,18 @@ class ModeCooldowns:
             self._until_ms[PlayerMode.SIGMOID] = now_ms + COOLDOWN_MS_LEAVE_SIGMOID
         elif mode == PlayerMode.SIGMA:
             self._until_ms[PlayerMode.SIGMA] = now_ms + COOLDOWN_MS_LEAVE_SIGMA
+        elif mode == PlayerMode.SQUARE_BLOCK:
+            self._until_ms[PlayerMode.SQUARE_BLOCK] = now_ms + COOLDOWN_MS_LEAVE_DERIV_BLOCK
+        elif mode == PlayerMode.SQRT_BLOCK:
+            self._until_ms[PlayerMode.SQRT_BLOCK] = now_ms + COOLDOWN_MS_LEAVE_DERIV_BLOCK
 
     def total_ms(self, mode: PlayerMode) -> int:
         if mode == PlayerMode.DERIVATIVE_BLOCK:
             return COOLDOWN_MS_LEAVE_DERIV_BLOCK
         if mode == PlayerMode.INTEGRAL_BLOCK:
             return COOLDOWN_MS_LEAVE_INT_BLOCK
+        if mode in (PlayerMode.SQUARE_BLOCK, PlayerMode.SQRT_BLOCK):
+            return COOLDOWN_MS_LEAVE_DERIV_BLOCK
         if mode == PlayerMode.SIGMOID:
             return COOLDOWN_MS_LEAVE_SIGMOID
         if mode == PlayerMode.SIGMA:

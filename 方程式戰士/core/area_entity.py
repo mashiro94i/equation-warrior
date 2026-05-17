@@ -97,7 +97,7 @@ class AreaBody(pygame.sprite.Sprite):
         """回傳 True 若已碎裂"""
         self.hits_taken += 1
         if self.hits_taken >= 3:
-            game_audio.play_break()
+            game_audio.play_break(at_rect=self.rect)
             self.kill()
             return True
         self._rebuild_image()
@@ -191,7 +191,7 @@ class AreaBody(pygame.sprite.Sprite):
         self.vel_x = AREA_BODY_PUSH_SPEED * dx / n
         self.vel_y = AREA_BODY_PUSH_SPEED * dy / n
         if dy > 0.5:
-            game_audio.play_fall()
+            game_audio.play_fall(at_rect=self.rect)
 
     def apply_throw_velocity(self, vx: float, vy: float):
         """面積拖曳放開甩出：給初速，滑行中仍可撞敵（與 update 既有邏輯相同）。"""
@@ -209,7 +209,7 @@ class AreaBody(pygame.sprite.Sprite):
         s = min(AREA_THROW_MAX_SPEED, n) / n
         self.vel_x = float(vx) * s
         self.vel_y = float(vy) * s
-        game_audio.play_area_throw()
+        game_audio.play_area_throw(at_rect=self.rect)
 
     def _update_long_fall_sfx(self) -> None:
         if self.vel_y <= 0.35:
@@ -224,7 +224,7 @@ class AreaBody(pygame.sprite.Sprite):
             return
         if now - self._airborne_since_ms < 1000:
             return
-        game_audio.play_fall()
+        game_audio.play_fall(at_rect=self.rect)
         self._long_fall_sfx_played = True
 
     def apply_motion_path(self, points):
@@ -278,7 +278,7 @@ class AreaBody(pygame.sprite.Sprite):
         for enemy in list(enemy_group):
             if enemy.is_alive and self.intersects_rect(enemy.rect):
                 enemy.take_damage(self.damage)
-                game_audio.play_break()
+                game_audio.play_break(at_rect=self.rect)
                 self.kill()
                 return
 
@@ -287,12 +287,12 @@ class AreaBody(pygame.sprite.Sprite):
 
         for _img, orect in world.obstacle_list:
             if self.rect.colliderect(orect):
-                game_audio.play_break()
+                game_audio.play_break(at_rect=self.rect)
                 self.kill()
                 return
 
         if not pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT).colliderect(self.rect):
-            game_audio.play_break()
+            game_audio.play_break(at_rect=self.rect)
             self.kill()
 
 

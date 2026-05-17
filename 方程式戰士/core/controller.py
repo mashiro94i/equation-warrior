@@ -39,6 +39,7 @@ class EquationController:
         self.facing = 1
         self.last_fire_time = -10000
         self.cubic_msg_until = 0
+        self.degree_zero_msg_until = 0
 
     def _player_degree(self) -> int:
         return int(getattr(self.player, "polynomial_degree", 1))
@@ -57,6 +58,8 @@ class EquationController:
         if deg == 3:
             self.cubic_msg_until = pygame.time.get_ticks() + 1500
             return
+        if deg == 0:
+            self.degree_zero_msg_until = pygame.time.get_ticks() + 1500
         if self.state == AimState.AIMING and self.aim_key == key:
             return
         if pygame.time.get_ticks() - self.last_fire_time < self.COOLDOWN_MS:
@@ -147,18 +150,20 @@ class EquationController:
         if self.power not in (PowerType.LINEAR, PowerType.QUADRATIC):
             return
         direction = self._linear_unit_dir() if self.power == PowerType.LINEAR else None
+        healing = bool(getattr(self.player, "heal_sigmoid_active", False))
         proj = MathProjectile(
             origin=self.player.rect.center,
             power=self.power,
             params=self.current_params(),
             facing=self.facing,
             direction=direction,
+            healing_shot=healing,
         )
         self.projectile_group.add(proj)
         self.last_fire_time = pygame.time.get_ticks()
         from . import game_audio
 
-        game_audio.play_shot()
+        game_audio.play_shot(at_rect=self.player.rect)
 
     # ---- 繪製 ----
     def draw_preview(self, surface, world=None):
@@ -204,11 +209,27 @@ class EquationController:
                 return True
         return False
 
-    def draw_cubic_msg(self, surface, font):
-        if pygame.time.get_ticks() < self.cubic_msg_until:
-            text = font.render("Cubic (deg 3): TODO 尚未實作", True, RED)
-            rect = text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 100))
-            surface.blit(text, rect)
+    def draw_polynomial_center_msg(self, surface, font):
+        """次方 0／3 於螢幕中央提示（與三次方 TODO 相同位置）。"""
+        from .enums import PlayerMode
+
+        if getattr(self.player, "game_mode", None) != PlayerMode.FUNCTION:
+            return
+        now = pygame.time.get_ticks()
+        deg = self._player_degree()
+        msg = None
+        color = RED
+        if deg == 3 and now < self.cubic_msg_until:
+            msg = "Cubic (deg 3): TODO 尚未實作"
+            color = RED
+        elif deg == 0:
+            msg = "次方 0：啵（無彈道，按住 1 發射）"
+            color = YELLOW
+        if msg is None:
+            return
+        text = font.render(msg, True, color)
+        rect = text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 100))
+        surface.blit(text, rect)
 
 
 class EquationDisplay:

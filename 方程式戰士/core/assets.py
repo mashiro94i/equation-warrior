@@ -24,6 +24,7 @@ _ASSETS_IMG_ROOT = Path(__file__).resolve().parent.parent / "assets" / "img"
 _tile_cache: dict[str, pygame.Surface] = {}
 _player_kenney_cache: dict[float, pygame.Surface] = {}
 _hint_icons: dict[str, pygame.Surface] | None = None
+_btn_bg_cache: dict[tuple[int, int], pygame.Surface] = {}
 _cursor_custom: pygame.Surface | None = None
 _cursor_custom_checked = False
 
@@ -169,15 +170,22 @@ def tile_health_pickup():
 
 
 def get_ui_button_background(width: int, height: int) -> pygame.Surface:
+    key = (int(width), int(height))
+    cached = _btn_bg_cache.get(key)
+    if cached is not None:
+        return cached
     img = load_img_png("ui/button_bg.png")
     if img is not None:
         try:
-            return pygame.transform.scale(img, (width, height))
+            surf = pygame.transform.scale(img, (width, height))
+            _btn_bg_cache[key] = surf
+            return surf
         except pygame.error:
             pass
     surf = pygame.Surface((width, height), pygame.SRCALPHA)
     surf.fill((52, 56, 72, 245))
     pygame.draw.rect(surf, (170, 185, 205), surf.get_rect(), 2)
+    _btn_bg_cache[key] = surf
     return surf
 
 

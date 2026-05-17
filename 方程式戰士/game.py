@@ -6,11 +6,13 @@
   3. __main__ 跑 main()
 """
 import pygame
-pygame.init()
-
-from core import *  # noqa: E402, F401, F403
-from core.main import main  # noqa: E402
-
 
 if __name__ == "__main__":
+    pygame.init()
+    from core.main import main
+
     main()
+else:
+    pygame.init()
+    from core import *  # noqa: E402, F401, F403
+    from core.main import main  # noqa: E402

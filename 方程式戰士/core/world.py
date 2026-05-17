@@ -12,7 +12,7 @@ from .assets import (
     tile_obstacle,
     tile_water,
 )
-from .constants import KENNEY_TILE_BASE, TILE_SIZE
+from .constants import KENNEY_TILE_BASE, SPIKE_DAMAGE_HEIGHT_FRAC, TILE_SIZE
 from .paths import find_map_dir_for_level
 from . import game_audio
 from .map_tile_loader import make_colored_stub, surface_for_gid
@@ -30,6 +30,31 @@ from .tile_types import (
     classify_tile,
 )
 
+
+def spike_visible_height_px() -> int:
+    return max(1, int(round(TILE_SIZE * SPIKE_DAMAGE_HEIGHT_FRAC)))
+
+
+def spike_display_rect_for_cell(wx: int, wy: int) -> pygame.Rect:
+    """地刺顯示／傷害區：貼齊格底，高度約 0.7 格。"""
+    h = spike_visible_height_px()
+    return pygame.Rect(wx, wy + TILE_SIZE - h, TILE_SIZE, h)
+
+
+def spike_crop_surface_from_tile(img: pygame.Surface) -> pygame.Surface:
+    """取貼圖底部約 0.7 高（與傷害區一致）。"""
+    h = spike_visible_height_px()
+    ih = img.get_height()
+    crop_h = max(1, min(ih, int(round(ih * SPIKE_DAMAGE_HEIGHT_FRAC))))
+    src = pygame.Rect(0, ih - crop_h, img.get_width(), crop_h)
+    cropped = img.subsurface(src).copy()
+    if cropped.get_height() != h:
+        return pygame.transform.smoothscale(cropped, (TILE_SIZE, h))
+    if cropped.get_width() != TILE_SIZE:
+        return pygame.transform.smoothscale(cropped, (TILE_SIZE, h))
+    return cropped
+
+
 # 語意格無 PNG 時的佔位色
 _SEMANTIC_RGB = {
     GID_SPAWN: (80, 200, 255),
@@ -43,11 +68,24 @@ _SEMANTIC_RGB = {
     65840: (240, 90, 90),
     65841: (235, 88, 92),
     131449: (220, 80, 120),
+    65843: (100, 200, 255),
+    65844: (110, 205, 255),
+    65845: (120, 210, 255),
     131448: (210, 70, 110),
+    131437: (180, 120, 200),
+    65822: (80, 160, 220),
+    65820: (200, 200, 100),
+    65823: (160, 80, 200),
     65850: (90, 85, 80),
+    65851: (92, 87, 82),
+    65877: (88, 90, 85),
+    65878: (90, 88, 84),
+    65985: (85, 88, 90),
     65875: (70, 70, 75),
+    65902: (85, 82, 78),
     13142: (82, 78, 74),
     131342: (82, 78, 74),
+    131356: (75, 72, 78),
     GID_AREA_TILE: (100, 200, 140),
     13168: (170, 110, 70),
     131368: (170, 110, 70),
@@ -63,6 +101,51 @@ _SEMANTIC_RGB = {
 def _tile_surface(tile_id: int) -> pygame.Surface | None:
     rgb = _SEMANTIC_RGB.get(tile_id)
     return surface_for_gid(tile_id, TILE_SIZE, fallback_rgb=rgb)
+
+
+def _tile_surface_display(tile_id: int, flip_x: bool = False) -> pygame.Surface | None:
+    img = _tile_surface(tile_id)
+    if img is None:
+        return None
+    if flip_x:
+        img = pygame.transform.flip(img, True, False)
+    return img
+
+
+def _load_flip_grid(map_csv_path: str | None, rows: int, cols: int) -> list[list[bool]]:
+    """讀取 map_editor 的 level{N}_flip.csv（0/1 水平翻轉遮罩）。"""
+    grid = [[False] * cols for _ in range(rows)]
+    if not map_csv_path:
+        return grid
+    base, ext = os.path.splitext(map_csv_path)
+    flip_path = base + "_flip" + ext
+    if not os.path.isfile(flip_path):
+        return grid
+    with open(flip_path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f, delimiter=",")
+        for y, row in enumerate(reader):
+            if y >= rows:
+                break
+            for x, cell in enumerate(row):
+                if x >= cols:
+                    break
+                cell = cell.strip()
+                if not cell:
+                    continue
+                try:
+                    grid[y][x] = int(cell) != 0
+                except ValueError:
+                    grid[y][x] = False
+    return grid
+
+
+def _cell_flip(flip_grid: list[list[bool]], x: int, y: int) -> bool:
+    if y < 0 or y >= len(flip_grid):
+        return False
+    row = flip_grid[y]
+    if x < 0 or x >= len(row):
+        return False
+    return bool(row[x])
 
 
 class HealthBox(pygame.sprite.Sprite):
@@ -91,18 +174,45 @@ class KeyPickup(pygame.sprite.Sprite):
     def update(self, player):
         if pygame.sprite.collide_rect(self, player) and player.is_alive:
             player.key_count += 1
-            game_audio.play_pickup()
+            from .soldier import Player
+
+            Player.show_center_notice(player, "獲得鑰匙！", duration_ms=2500)
+            game_audio.play_pickup(at_rect=self.rect)
             self.kill()
 
 
 class KenneyVisualTile(pygame.sprite.Sprite):
-    """CSV 內 Kenney 語意未定義的格（僅顯示、無碰撞）。"""
+    """CSV 內 Kenney 語意未定義的格（僅顯示、無碰撞）；部分 GID 會動畫切換。"""
 
-    def __init__(self, x, y, tile_id: int):
+    def __init__(self, x, y, tile_id: int, flip_x: bool = False):
         super().__init__()
-        img = _tile_surface(tile_id) or make_colored_stub(TILE_SIZE, (140, 140, 160))
+        self.world_x = int(x)
+        self.world_y = int(y)
+        self.source_gid = int(tile_id)
+        self.flip_x = bool(flip_x)
+        from .tile_animations import init_tile_anim_state
+
+        self.anim_state = init_tile_anim_state(self.source_gid)
+        self._last_anim_ms = pygame.time.get_ticks()
+        self.update_visual()
+
+    def update_visual(self, now_ms: int | None = None) -> None:
+        if now_ms is None:
+            now_ms = pygame.time.get_ticks()
+        from .tile_animations import resolve_display_gid, tile_has_animation
+
+        dt_ms = max(0, now_ms - getattr(self, "_last_anim_ms", now_ms))
+        self._last_anim_ms = now_ms
+        gid = (
+            resolve_display_gid(self.source_gid, self.anim_state, now_ms, dt_ms)
+            if tile_has_animation(self.source_gid)
+            else self.source_gid
+        )
+        img = _tile_surface_display(gid, self.flip_x) or make_colored_stub(
+            TILE_SIZE, (140, 140, 160)
+        )
         self.image = img
-        self.rect = self.image.get_rect(topleft=(x, y))
+        self.rect = self.image.get_rect(topleft=(self.world_x, self.world_y))
 
 
 class HeartPickup(pygame.sprite.Sprite):
@@ -117,7 +227,7 @@ class HeartPickup(pygame.sprite.Sprite):
     def update(self, player):
         if pygame.sprite.collide_rect(self, player) and player.is_alive:
             player.heal(player.max_health / 3.0)
-            game_audio.play_pickup()
+            game_audio.play_pickup(at_rect=self.rect)
             self.kill()
 
 
@@ -172,10 +282,13 @@ class World:
         self.heart_pickups: list[tuple[int, int, int]] = []
         self.key_pickups: list[tuple[int, int, int]] = []
         self._key_door_entries: list[tuple[pygame.Surface, pygame.Rect, int, int]] = []
-        self.kenney_visual_tiles: list[tuple[int, int, int]] = []
+        self.kenney_visual_tiles: list[tuple[int, int, int, bool]] = []
+        self.flip_x_grid: list[list[bool]] = []
         self.calculus_derivative_spawns: list[tuple[int, int]] = []
         self.calculus_integral_spawns: list[tuple[int, int, str]] = []
         self._spike_switch_tiles: list[tuple[pygame.Surface, pygame.Rect]] = []
+        self._animated_wall_entries: list[dict] = []
+        self._anim_last_ms = 0
         self.spikes_extended = True
         self._switch_latch = False
         self.level_cols = 0
@@ -192,9 +305,58 @@ class World:
     def scroll_max_px(self, screen_w: int) -> int:
         return max(0, self.world_length * TILE_SIZE - screen_w)
 
+    def _finalize_spawn_placements(
+        self,
+        player_cells: list[tuple[int, int]],
+        enemy_cells: list[tuple[int, int, int]],
+    ) -> None:
+        """依載入後的障礙，將出生／敵人格對齊可踩地面。"""
+        from .map_spawn import enemy_spawn_center, player_spawn_center
+
+        rows = self.level_rows
+        if player_cells:
+            gx, gy = player_cells[-1]
+            self.player_spawn = player_spawn_center(
+                self._wall_obstacles,
+                self._animated_wall_entries,
+                gx,
+                gy,
+                rows,
+            )
+            self.respawn_point = self.player_spawn
+        self.enemy_spawns = []
+        for gx, gy, gid in enemy_cells:
+            cx, cy = enemy_spawn_center(
+                self._wall_obstacles,
+                self._animated_wall_entries,
+                gx,
+                gy,
+                rows,
+            )
+            self.enemy_spawns.append((cx, cy, gid))
+
     def rebuild_obstacle_list(self) -> None:
         # 地刺不進 obstacle_list：角色／面積可穿過該格，僅靠 spike_damage_rects() 扣血
         self.obstacle_list = list(self._wall_obstacles)
+        for entry in self._animated_wall_entries:
+            self.obstacle_list.append((entry["image"], entry["rect"]))
+
+    def update_animated_tiles(self, now_ms: int) -> None:
+        """更新可動畫牆／裝飾格的貼圖（65850 累積演化、成對切換等）。"""
+        from .tile_animations import init_tile_anim_state, resolve_display_gid
+
+        dt_ms = max(0, now_ms - self._anim_last_ms)
+        self._anim_last_ms = now_ms
+        for entry in self._animated_wall_entries:
+            gid = resolve_display_gid(
+                entry["source_gid"], entry.get("anim_state"), now_ms, dt_ms,
+            )
+            img = _tile_surface_display(gid, entry["flip_x"]) or make_colored_stub(
+                TILE_SIZE, _SEMANTIC_RGB.get(gid, (88, 85, 82)),
+            )
+            entry["image"] = img
+            entry["rect"] = img.get_rect(topleft=(entry["wx"], entry["wy"]))
+        self.rebuild_obstacle_list()
 
     def remove_destructible_walls_hitting(self, area) -> bool:
         """面積體與可破壞牆像素重疊時移除該格並更新碰撞。回傳是否有移除。"""
@@ -214,7 +376,7 @@ class World:
             removed = True
         if removed:
             self.rebuild_obstacle_list()
-            game_audio.play_break()
+            game_audio.play_break(at_rect=area.rect)
         return removed
 
     def toggle_spikes(self) -> None:
@@ -256,7 +418,12 @@ class World:
         if touching:
             if not self._switch_latch:
                 self.toggle_spikes()
-                game_audio.play_flip()
+                flip_rect = player_rect
+                for _img, switch_rect in switches:
+                    if player_rect.colliderect(switch_rect):
+                        flip_rect = switch_rect
+                        break
+                game_audio.play_flip(at_rect=flip_rect)
                 self._switch_latch = True
         else:
             self._switch_latch = False
@@ -278,13 +445,13 @@ class World:
                 if 0 <= gx < len(row):
                     row[gx] = -1
             self.rebuild_obstacle_list()
-            game_audio.play_flip()
+            game_audio.play_flip(at_rect=rect)
             return
 
     def spike_damage_rects(self) -> list[pygame.Rect]:
         if not self.spikes_extended:
             return []
-        return [sp["rect"] for sp in self._spike_obstacles]
+        return [sp["rect"].copy() for sp in self._spike_obstacles]
 
     def update_spike_flip_on_player_contact(self, player_rect: pygame.Rect) -> None:
         """玩家進入地刺格瞬間（上升沿）將該格圖像水平翻轉。"""
@@ -326,6 +493,8 @@ class World:
         base_dir 為 None 時：優先 `map_editor/map/`，其次 `方程式戰士/map/`。
         """
         self._wall_obstacles.clear()
+        self._animated_wall_entries.clear()
+        self._anim_last_ms = 0
         self._spike_obstacles.clear()
         self._spike_touch_prev.clear()
         self.obstacle_list.clear()
@@ -341,6 +510,7 @@ class World:
         self.key_pickups.clear()
         self._key_door_entries.clear()
         self.kenney_visual_tiles.clear()
+        self.flip_x_grid.clear()
         self.calculus_derivative_spawns.clear()
         self.calculus_integral_spawns.clear()
         self._spike_switch_tiles.clear()
@@ -386,6 +556,10 @@ class World:
         use_cols = map_cols
         self.level_rows = use_rows
         self.level_cols = use_cols
+        self.flip_x_grid = _load_flip_grid(path, use_rows, use_cols)
+
+        pending_player_cells: list[tuple[int, int]] = []
+        pending_enemy_cells: list[tuple[int, int, int]] = []
 
         for y in range(use_rows):
             row = world_data[y]
@@ -396,14 +570,17 @@ class World:
                 if tile < 0:
                     continue
                 wx, wy = x * TILE_SIZE, y * TILE_SIZE
+                flip_x = _cell_flip(self.flip_x_grid, x, y)
                 kind = classify_tile(tile)
 
                 if kind == "spawn":
-                    cx, cy = wx + TILE_SIZE // 2, wy + TILE_SIZE // 2
-                    self.player_spawn = (cx, cy)
-                    self.respawn_point = (cx, cy)
+                    pending_player_cells.append((x, y))
                 elif kind == "enemy":
-                    self.enemy_spawns.append((wx + TILE_SIZE // 2, wy + TILE_SIZE // 2, tile))
+                    from .enemy_archetypes import normalize_enemy_spawn_gid
+
+                    pending_enemy_cells.append((x, y, normalize_enemy_spawn_gid(tile)))
+                elif kind == "anim_decor":
+                    self.kenney_visual_tiles.append((wx, wy, tile, flip_x))
                 elif kind == "enemy_walk_alt":
                     pass
                 elif kind == "area_tile":
@@ -417,7 +594,7 @@ class World:
                     cy = wy + TILE_SIZE // 2
                     self.calculus_integral_spawns.append((cx, cy, "y"))
                 elif kind == "destructible_wall":
-                    img = _tile_surface(tile) or make_colored_stub(
+                    img = _tile_surface_display(tile, flip_x) or make_colored_stub(
                         TILE_SIZE, _SEMANTIC_RGB.get(tile, (170, 110, 70))
                     )
                     rect = img.get_rect(topleft=(wx, wy))
@@ -425,17 +602,34 @@ class World:
                     self._destructible_wall_entries.append((img, rect, x, y))
                 elif kind == "level_exit":
                     self.exit_tiles.append((wx, wy, tile))
+                elif kind == "animated_wall":
+                    from .tile_animations import init_tile_anim_state
+
+                    anim_state = init_tile_anim_state(tile)
+                    img = _tile_surface_display(tile, flip_x) or make_colored_stub(
+                        TILE_SIZE, _SEMANTIC_RGB.get(tile, (88, 85, 82)),
+                    )
+                    rect = img.get_rect(topleft=(wx, wy))
+                    self._animated_wall_entries.append({
+                        "wx": wx,
+                        "wy": wy,
+                        "source_gid": tile,
+                        "flip_x": flip_x,
+                        "anim_state": anim_state,
+                        "image": img,
+                        "rect": rect,
+                    })
                 elif kind == "wall":
-                    img = _tile_surface(tile) or make_colored_stub(
+                    img = _tile_surface_display(tile, flip_x) or make_colored_stub(
                         TILE_SIZE, _SEMANTIC_RGB.get(tile, (88, 85, 82))
                     )
                     self._wall_obstacles.append((img, img.get_rect(topleft=(wx, wy))))
                 elif kind == "spike":
-                    img0 = _tile_surface(tile) or make_colored_stub(
+                    img0 = _tile_surface_display(tile, flip_x) or make_colored_stub(
                         TILE_SIZE, _SEMANTIC_RGB[GID_SPIKE]
                     )
-                    base = img0.copy()
-                    rect = base.get_rect(topleft=(wx, wy))
+                    base = spike_crop_surface_from_tile(img0)
+                    rect = spike_display_rect_for_cell(wx, wy)
                     self._spike_obstacles.append(
                         {
                             "base": base,
@@ -449,14 +643,14 @@ class World:
                 elif kind == "key_pickup":
                     self.key_pickups.append((wx, wy, tile))
                 elif kind == "key_door":
-                    img = _tile_surface(tile) or make_colored_stub(
+                    img = _tile_surface_display(tile, flip_x) or make_colored_stub(
                         TILE_SIZE, _SEMANTIC_RGB.get(tile, (120, 90, 50))
                     )
                     rect = img.get_rect(topleft=(wx, wy))
                     self._wall_obstacles.append((img, rect))
                     self._key_door_entries.append((img, rect, x, y))
                 elif kind == "switch":
-                    img = _tile_surface(tile) or make_colored_stub(
+                    img = _tile_surface_display(tile, flip_x) or make_colored_stub(
                         TILE_SIZE, _SEMANTIC_RGB[GID_SPIKE_SWITCH]
                     )
                     self._spike_switch_tiles.append((img, img.get_rect(topleft=(wx, wy))))
@@ -470,23 +664,21 @@ class World:
                     elif 11 <= tile <= 14:
                         self.decorations.append((wx, wy, tile - 11))
                     elif tile == 15:
-                        cx, cy = wx + TILE_SIZE // 2, wy + TILE_SIZE // 2
-                        self.player_spawn = (cx, cy)
-                        if self.respawn_point is None:
-                            self.respawn_point = (cx, cy)
+                        pending_player_cells.append((x, y))
                     elif tile == 16:
-                        self.enemy_spawns.append((wx + TILE_SIZE // 2, wy + TILE_SIZE // 2, 65834))
+                        pending_enemy_cells.append((x, y, 65834))
                     elif tile == 19:
                         self.health_box_positions.append((wx, wy))
                     elif tile == 20:
                         self.exit_tiles.append((wx, wy, 20))
                 elif kind == "air" and tile >= KENNEY_TILE_BASE:
-                    self.kenney_visual_tiles.append((wx, wy, tile))
+                    self.kenney_visual_tiles.append((wx, wy, tile, flip_x))
 
         self.grid_data = [row[:] for row in world_data]
         self.set_world_length_from_csv(world_data)
         self.exit_pos = (self.exit_tiles[0][0], self.exit_tiles[0][1]) if self.exit_tiles else None
         self.rebuild_obstacle_list()
+        self._finalize_spawn_placements(pending_player_cells, pending_enemy_cells)
 
     def draw_obstacles(self, surface):
         for img, rect in self.obstacle_list:

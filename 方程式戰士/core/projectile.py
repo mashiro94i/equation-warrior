@@ -1,9 +1,12 @@
 """玩家方程式子彈 + 敵人子彈 + Sigma 數字彈"""
+import math
+
 import pygame
 
 from .constants import (
     ENEMY_BULLET_DAMAGE,
-    GREEN, INTEGRAL_HIT_BULLET_DAMAGE_MULT, INTEGRAL_HIT_BULLET_RADIUS_MULT,
+    GREEN, HEAL_SIGMOID_HEAL_AMOUNT,
+    INTEGRAL_HIT_BULLET_DAMAGE_MULT, INTEGRAL_HIT_BULLET_RADIUS_MULT,
     INTEGRAL_XY_EXTEND_MAX_PX, PURPLE, RED,
     SCREEN_HEIGHT, SCREEN_WIDTH, YELLOW,
     player_attack_hit_damage,
@@ -20,7 +23,7 @@ class MathProjectile(pygame.sprite.Sprite):
     """
     SPEED_PX = 6
 
-    def __init__(self, origin, power, params, facing, direction=None):
+    def __init__(self, origin, power, params, facing, direction=None, *, healing_shot: bool = False):
         super().__init__()
         self.origin = (origin[0], origin[1])
         self.power = power
@@ -29,6 +32,7 @@ class MathProjectile(pygame.sprite.Sprite):
         self.direction = direction
         self.world_x = 0.0
         self.world_y = 0.0
+        self.healing_shot = bool(healing_shot)
         self.hit_damage = player_attack_hit_damage()
         self._bullet_radius = 7
         self._enlarged_by_integral = False
@@ -44,8 +48,21 @@ class MathProjectile(pygame.sprite.Sprite):
         r = max(3, int(self._bullet_radius))
         d = r * 2 + 2
         self.image = pygame.Surface((d, d), pygame.SRCALPHA)
-        pygame.draw.circle(self.image, RED, (r + 1, r + 1), r)
-        pygame.draw.circle(self.image, YELLOW, (r + 1, r + 1), r, 1)
+        if self.healing_shot:
+            pygame.draw.circle(self.image, GREEN, (r + 1, r + 1), r)
+            pygame.draw.circle(self.image, (180, 255, 200), (r + 1, r + 1), r, 1)
+        else:
+            pygame.draw.circle(self.image, RED, (r + 1, r + 1), r)
+            pygame.draw.circle(self.image, YELLOW, (r + 1, r + 1), r, 1)
+
+    def travel_angle_rad(self) -> float:
+        """數學座標下的飛行方向角（供平方塊分裂彈使用）。"""
+        if self.power == PowerType.LINEAR and self.direction is not None:
+            dx, dy = self.direction
+            if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+                return 0.0
+            return math.atan2(float(dy), float(dx))
+        return 0.0 if self.facing >= 0 else math.pi
 
     def apply_integral_enlarge(self):
         if self._enlarged_by_integral:
@@ -97,13 +114,22 @@ class MathProjectile(pygame.sprite.Sprite):
                     return
         for enemy in list(enemy_group):
             if enemy.is_alive and pygame.sprite.collide_rect(self, enemy):
+                from .enemy_special import can_take_projectile_damage, on_projectile_hit
+
+                if not can_take_projectile_damage(enemy, self):
+                    self.kill()
+                    return
                 eid = id(enemy)
+                if self.healing_shot:
+                    on_projectile_hit(enemy, self)
+                    self.kill()
+                    return
                 if self._enlarged_by_integral:
                     if eid not in self._pierced_enemy_ids:
-                        enemy.take_damage(self.hit_damage)
+                        on_projectile_hit(enemy, self)
                         self._pierced_enemy_ids.add(eid)
                 else:
-                    enemy.take_damage(self.hit_damage)
+                    on_projectile_hit(enemy, self)
                     self.kill()
                     return
 
@@ -209,8 +235,11 @@ class NumericProjectile(pygame.sprite.Sprite):
                     return
         for enemy in list(enemy_group):
             if enemy.is_alive and pygame.sprite.collide_rect(self, enemy):
-                if self.hit_damage > 0:
-                    enemy.take_damage(self.hit_damage)
+                from .enemy_special import can_take_projectile_damage, on_projectile_hit
+
+                if can_take_projectile_damage(enemy, self):
+                    if self.hit_damage > 0:
+                        on_projectile_hit(enemy, self)
                 self.kill()
                 return
 
@@ -223,9 +252,11 @@ class EnemyBullet(pygame.sprite.Sprite):
     _BASE_RADIUS = 5.0
     _MAX_RADIUS = 20.0
 
-    def __init__(self, x, y, direction):
+    def __init__(self, x, y, direction, *, vy: float = 0.0):
         super().__init__()
-        self.direction = direction
+        self.direction = int(direction) if direction else 1
+        self.vx = float(self.direction) * float(self.SPEED)
+        self.vy = float(vy)
         self.is_healing = False
         self.heal_amount = 0.0
         self._bullet_radius = float(self._BASE_RADIUS)
@@ -278,7 +309,9 @@ class EnemyBullet(pygame.sprite.Sprite):
         return self.rect.copy()
 
     def update(self, world, player, area_group=None):
-        self.rect.x += self.SPEED * self.direction
+        self.rect.x += int(round(self.vx))
+        if self.vy:
+            self.rect.y += int(round(self.vy))
         hr = self.collision_rect()
         if hr.right < 0 or hr.left > SCREEN_WIDTH:
             self.kill()
