@@ -24,7 +24,7 @@ python -m unittest discover -v
 ```
 
 - **地圖**：優先讀 `../map_editor/map/level{N}.csv`（及 `level{N}_flip.csv` 等）；若無則用本專案 `map/`。
-- **設定**：`settings.json` 儲存 BGM／音效音量與解析度，退出遊戲時寫回。
+- **設定**：本機 `settings.json`（不入版控）儲存 BGM／音效音量與解析度；首次執行或無檔時 **BGM／音效皆預設 50%**（`core/settings_io.py`）。
 
 ---
 

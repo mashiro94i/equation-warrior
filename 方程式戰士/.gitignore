@@ -36,3 +36,6 @@ Desktop.ini
 # 日誌與暫存
 *.log
 *.tmp
+
+# 本機設定（音量、解析度；預設 BGM／音效 50% 見 core/settings_io.py）
+settings.json
