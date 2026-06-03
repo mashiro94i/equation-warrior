@@ -29,6 +29,7 @@ class ActionTypes(Enum):
     IDLE = "Idle"
     RUN = "Run"
     JUMP = "Jump"
+    CAST = "Cast"
     DEATH = "Death"
 
 

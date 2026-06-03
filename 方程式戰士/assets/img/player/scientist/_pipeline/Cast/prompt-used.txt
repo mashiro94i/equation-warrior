@@ -1,0 +1,18 @@
+Identity lock — MUST match Hurt/Death reference frames exactly
+
+FACE / SKIN (critical):
+- Warm tan/peach skin tone (#E8B88A range), same saturation as Hurt/Death — NEVER pale white or grey-white skin
+- Thick black-rimmed round glasses with SOLID WHITE opaque lenses — NO pupils, NO eyes, NO iris visible behind glasses ever
+- Simple small mouth when needed; no detailed anime eyes
+
+BODY / COSTUME:
+- Messy spiky brown hair (same brown as Hurt/Death)
+- White open lab coat, light blue shirt, dark grey trousers, brown shoes
+- Same pixel scale, line weight, and cel-shading density as Hurt/Death sprites
+
+TECH:
+- Side view facing RIGHT; feet on same baseline across cells
+- 100% solid flat magenta #FF00FF background only
+- Retro 16-bit pixel platformer, crisp black 1px outlines
+- NO laser gun; Cast = throw small potion bottle only, bottle stays near hand
+- NO text, NO grid lines, nothing crosses cell edges

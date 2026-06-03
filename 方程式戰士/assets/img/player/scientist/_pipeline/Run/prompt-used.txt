@@ -1,0 +1,4 @@
+Regenerated Run v4 — 1x4 horizontal strip, #FF00FF only.
+Style refs: Hurt/00, Idle idle-2. Tan skin, white opaque glasses (no pupils),
+brown hair, white lab coat, blue shirt, grey pants. Side view facing right,
+4-frame run cycle, same height and feet baseline per cell.

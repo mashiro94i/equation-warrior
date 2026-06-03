@@ -495,6 +495,39 @@ class TestCsvMapAreaCells(unittest.TestCase):
         )
         self.assertIsNone(square_disk_side_n({(0, 0), (1, 0)}))
 
+    def test_columns_vertically_dense(self):
+        from core.csv_map_area_cells import _columns_vertically_dense
+
+        self.assertTrue(_columns_vertically_dense({(0, 0), (0, 1), (0, 2)}))
+        self.assertTrue(_columns_vertically_dense({(0, 5), (1, 5)}))
+        self.assertFalse(_columns_vertically_dense({(0, 0), (0, 2)}))
+
+    def test_component_should_integral_to_ground(self):
+        from core.csv_map_area_cells import component_should_integral_to_ground
+
+        class _FakeWorld:
+            def __init__(self, obstacles):
+                self.obstacle_list = obstacles
+
+        ts = 64
+        air = _FakeWorld([])
+        self.assertFalse(
+            component_should_integral_to_ground({(0, 3)}, ts, air),
+        )
+        gap_col = _FakeWorld([])
+        self.assertFalse(
+            component_should_integral_to_ground({(0, 0), (0, 2)}, ts, gap_col),
+        )
+
+        import pygame
+
+        ground_rect = pygame.Rect(0, 4 * ts, ts, ts)
+        on_ground = _FakeWorld([(None, ground_rect)])
+        pillar = {(0, 0), (0, 1), (0, 2), (0, 3)}
+        self.assertTrue(
+            component_should_integral_to_ground(pillar, ts, on_ground),
+        )
+
 
 class TestWorldCSVLoad(unittest.TestCase):
     def test_load_level1_from_map_editor(self):

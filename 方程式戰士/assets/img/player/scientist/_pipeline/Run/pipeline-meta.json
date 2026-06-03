@@ -1,0 +1,11 @@
+{
+  "rows": 1,
+  "cols": 4,
+  "labels": [
+    "run-1",
+    "run-2",
+    "run-3",
+    "run-4"
+  ],
+  "layout": "1x4_strip"
+}

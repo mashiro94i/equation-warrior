@@ -4,7 +4,11 @@ import sys
 
 import pygame
 
-from .area_entity import build_area_bodies_from_polygon, pick_stationary_area_at
+from .area_entity import (
+    build_area_bodies_from_circle,
+    build_area_bodies_from_polygon,
+    pick_stationary_area_at,
+)
 from .csv_map_area_cells import spawn_area_bodies_for_gid65796
 from . import game_audio
 from . import settings_io
@@ -384,7 +388,12 @@ def main():
         player.heal_sigmoid_active = False
         player.integral_only_lock = False
         if not cfg.mode_allowed(player.game_mode):
-            player.game_mode = PlayerMode.FUNCTION
+            if cfg.allow_brush_b:
+                player.game_mode = PlayerMode.BRUSH
+            else:
+                player.game_mode = PlayerMode.FUNCTION
+        elif cfg.allow_brush_b and level == 2:
+            player.game_mode = PlayerMode.BRUSH
         controller.force_idle()
         brush_manager.end_stroke()
         reset_area_drag()
@@ -650,7 +659,7 @@ def main():
                     [
                         "按 B 可在左側可放置區開始繪製筆觸。",
                         "全場最多 5 色筆觸，總長度上限 1800px。",
-                        "形成閉環時會自動轉成面積體。",
+                        "形成閉環時會自動轉成面積體；點一下（短筆觸）變小圓面積。",
                         "微分/積分塊碰到筆觸時，會整色整筆清除。",
                         "積分互動可把非閉環筆觸轉成可碰撞面積。",
                     ],
@@ -961,14 +970,19 @@ def main():
                     shift_world(background_scroll)
                     player.rect.x -= background_scroll
                     background_scroll = 0
-                if player.is_in_air:
+                player.tick_cast_hold_release()
+                if player.cast_animation_busy():
+                    player.update_action(ActionTypes.CAST)
+                    player.is_x_flip = player.facing == -1
+                elif player.is_in_air:
                     player.update_action(ActionTypes.JUMP)
                 elif is_left or is_right:
                     player.update_action(ActionTypes.RUN)
                 else:
                     player.update_action(ActionTypes.IDLE)
-                if player.is_aiming:
-                    player.is_x_flip = player.facing == -1
+            else:
+                if player.action != ActionTypes.DEATH:
+                    player.update_action(ActionTypes.DEATH)
 
             for deco in decoration_group:
                 if not isinstance(deco, KenneyVisualTile):
@@ -1074,9 +1088,18 @@ def main():
             for r in list(sqrt_group):
                 resolve_algebra_block_interactions(r, player, projectile_group, enemy_group)
 
+            ref_r = max(1.0, float(player.rect.width) * 2.0)
+            for center, ci in brush_manager.drain_tap_circles():
+                for body in build_area_bodies_from_circle(
+                    center,
+                    radius=max(4.0, player.rect.width * 0.5),
+                    world=world,
+                    source_color_index=ci,
+                    damage_ref_radius=ref_r,
+                ):
+                    area_group.add(body)
             for pts, ci in brush_manager.drain_closed_loop_areas():
                 if len(pts) >= 3:
-                    ref_r = max(1.0, float(player.rect.width) * 2.0)
                     for body in build_area_bodies_from_polygon(
                         pts,
                         world,
@@ -1334,25 +1357,6 @@ def main():
                 mx, my = game_mouse_pos()
                 s_txt = font_large.render("S", True, GOLD)
                 screen.blit(s_txt, s_txt.get_rect(center=(mx, my)))
-            elif player.game_mode == PlayerMode.DERIVATIVE_BLOCK:
-                mx, my = game_mouse_pos()
-                d_up = font_small.render("d", True, YELLOW)
-                d_dn = font_small.render("dx", True, YELLOW)
-                screen.blit(d_up, d_up.get_rect(center=(mx, my - 9)))
-                pygame.draw.line(screen, YELLOW, (mx - 11, my - 1), (mx + 11, my - 1), 2)
-                screen.blit(d_dn, d_dn.get_rect(center=(mx, my + 9)))
-            elif player.game_mode == PlayerMode.INTEGRAL_BLOCK:
-                mx, my = game_mouse_pos()
-                int_txt = font_med.render(f"∫{player.integral_axis.value}", True, YELLOW)
-                screen.blit(int_txt, int_txt.get_rect(center=(mx, my)))
-            elif player.game_mode == PlayerMode.SQUARE_BLOCK:
-                mx, my = game_mouse_pos()
-                sq_txt = font_med.render("x²", True, YELLOW)
-                screen.blit(sq_txt, sq_txt.get_rect(center=(mx, my)))
-            elif player.game_mode == PlayerMode.SQRT_BLOCK:
-                mx, my = game_mouse_pos()
-                rt_txt = font_med.render("√x", True, YELLOW)
-                screen.blit(rt_txt, rt_txt.get_rect(center=(mx, my)))
             elif player.game_mode == PlayerMode.SIGMA:
                 mx, my = game_mouse_pos()
                 sigma_txt = font_med.render("Σx", True, YELLOW)
@@ -1410,9 +1414,21 @@ def main():
 
             game_audio.set_underwater_bubbles_active(underwater_ambient_visible())
             draw_control_hint_strip(screen)
-            draw_playing_cursor(screen, game_mouse_pos())
+            area_dragging = (
+                player.game_mode == PlayerMode.AREA_MOVE
+                and area_drag_target is not None
+                and pygame.mouse.get_pressed()[0]
+            )
+            draw_playing_cursor(
+                screen,
+                game_mouse_pos(),
+                player.game_mode,
+                area_dragging=area_dragging,
+                integral_axis=getattr(player, "integral_axis", None),
+            )
 
         elif state == GameState.DEATH:
+            player.update_animation()
             game_audio.set_underwater_bubbles_active(False)
             draw_parallax_background(screen, background_scroll)
             world.draw_obstacles(screen)
@@ -1685,7 +1701,11 @@ def main():
                         if n == 0:
                             game_audio.start_bubble_repeat(at_rect=player.rect)
                         sigma_mouse_down_ms = None
-                    brush_manager.end_stroke()
+                    if player.game_mode == PlayerMode.BRUSH:
+                        mx_b, my_b = mouse_to_game(event.pos)
+                        brush_manager.end_stroke(mx_b, my_b, player.rect.width)
+                    else:
+                        brush_manager.end_stroke()
                 elif event.type == pygame.MOUSEMOTION:
                     if player.game_mode == PlayerMode.BRUSH:
                         brush_manager.extend_stroke(*mouse_to_game(event.pos))

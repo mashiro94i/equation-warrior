@@ -1,0 +1,11 @@
+{
+  "rows": 1,
+  "cols": 4,
+  "labels": [
+    "jump-1",
+    "jump-2",
+    "jump-3",
+    "jump-4"
+  ],
+  "layout": "1x4_strip"
+}

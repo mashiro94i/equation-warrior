@@ -20,6 +20,9 @@ from .enemy_archetypes import (
 from .projectile import EnemyBullet
 
 _SIN_LABELS = ("sin(x)", "cos(x)", "-sin(x)")
+# 65822 暴走：降低每輪發數與頻率，避免彈幕過密卡頓
+AREA_SPRAYER_RAMPAGE_BURST_MS = 120
+AREA_SPRAYER_RAMPAGE_BULLETS = 6
 SIN_LUNGE_TILES = 4
 SIN_STUN_MS = 5000
 SIN_STANDOFF_MIN_TILES = 2.0
@@ -892,14 +895,14 @@ def ai_area_sprayer(
 
     enemy.direction = 1 if target_area.rect.centerx >= enemy.rect.centerx else -1
     enemy.facing = enemy.direction
-    burst_cd = 70
+    burst_cd = AREA_SPRAYER_RAMPAGE_BURST_MS
     if now_ms < int(getattr(enemy, "_area_rampage_next_ms", 0)):
         enemy.update_action(ActionTypes.IDLE)
         return True
     enemy._area_rampage_next_ms = now_ms + burst_cd
     game_audio.play_area_rampage(at_rect=enemy.rect, enemy=enemy)
     ax, ay = target_area.rect.center
-    for _ in range(14):
+    for _ in range(AREA_SPRAYER_RAMPAGE_BULLETS):
         _spawn_enemy_bullet_toward(
             enemy_bullet_group,
             enemy.rect.centerx + random.randint(-8, 8),
@@ -912,8 +915,15 @@ def ai_area_sprayer(
     return True
 
 
-def ai_area_sprayer_chase(enemy, player, world, area_group, enemy_group=None) -> None:
-    """直線朝玩家飛行移動（穿牆、無重力）。"""
+def ai_area_sprayer_chase(
+    enemy,
+    player,
+    world,
+    area_group,
+    enemy_bullet_group=None,
+    enemy_group=None,
+) -> None:
+    """直線朝玩家飛行（穿牆、無重力）；無靜止面積時以一般模式射擊玩家。"""
     from .enums import ActionTypes
 
     dx = float(player.rect.centerx - enemy.rect.centerx)
@@ -930,6 +940,10 @@ def ai_area_sprayer_chase(enemy, player, world, area_group, enemy_group=None) ->
     enemy.rect.x = max(0, min(SCREEN_WIDTH - enemy.rect.width, enemy.rect.x))
     enemy.rect.y = max(0, min(SCREEN_HEIGHT - enemy.rect.height, enemy.rect.y))
     enemy.update_action(ActionTypes.RUN if dist > 6 else ActionTypes.IDLE)
+    if enemy_bullet_group is not None and player.is_alive and enemy.shoot_cooldown == 0:
+        cd = max(3, effective_shoot_cooldown(enemy))
+        if random.randint(1, cd) == 1:
+            enemy.shoot(enemy_bullet_group, player_ref=player)
 
 
 def _sin_wall_margin_px() -> int:

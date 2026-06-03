@@ -1,0 +1,11 @@
+{
+  "rows": 1,
+  "cols": 4,
+  "labels": [
+    "idle-1",
+    "idle-2",
+    "idle-3",
+    "idle-4"
+  ],
+  "layout": "1x4_strip"
+}

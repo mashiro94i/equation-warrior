@@ -1,10 +1,11 @@
-"""CSV 中 65796：八連通合併 → n×n 實心正方形用圓；其餘統一平滑上包絡後對 y 積分。"""
+"""CSV 中 65796：八連通合併 → n×n 實心正方形用圓；其餘平滑上包絡，有支撐才 ∫y 向下填。"""
 from __future__ import annotations
 
 from collections import deque
 
 from .area_entity import (
     build_area_bodies_from_circle,
+    build_area_bodies_from_polygon,
     build_area_bodies_from_shifted_stroke,
 )
 
@@ -168,6 +169,104 @@ def _top_profile_centers(
     return pts
 
 
+def _columns_vertically_dense(cells: set[tuple[int, int]]) -> bool:
+    """每欄從最低到最高格必須連續無空洞（編輯器「填滿」柱狀）。"""
+    by_x: dict[int, list[int]] = {}
+    for x, y in cells:
+        by_x.setdefault(x, []).append(y)
+    for ys in by_x.values():
+        lo, hi = min(ys), max(ys)
+        if hi - lo + 1 != len(ys):
+            return False
+    return True
+
+
+def _bottom_cells(cells: set[tuple[int, int]]) -> list[tuple[int, int]]:
+    by_x: dict[int, int] = {}
+    for x, y in cells:
+        if x not in by_x or y > by_x[x]:
+            by_x[x] = y
+    return list(by_x.items())
+
+
+def _ground_top_below_cell(
+    x: int,
+    y: int,
+    tile_size: int,
+    world,
+    *,
+    max_gap_tiles: float = 2.0,
+) -> float | None:
+    """該格正下方最近障礙物頂緣（世界 y）；無則 None。"""
+    cell_left = x * tile_size
+    cell_right = (x + 1) * tile_size
+    probe_bottom = (y + 1) * tile_size
+    max_gap = tile_size * max_gap_tiles
+    best: float | None = None
+    for _img, rect in world.obstacle_list:
+        if rect.right <= cell_left or rect.left >= cell_right:
+            continue
+        if rect.top < probe_bottom - tile_size * 0.35:
+            continue
+        if rect.top > probe_bottom + max_gap:
+            continue
+        if best is None or rect.top < best:
+            best = float(rect.top)
+    return best
+
+
+def component_should_integral_to_ground(
+    cells: set[tuple[int, int]], tile_size: int, world
+) -> bool:
+    """柱狀填滿且每欄底格下方有地面／牆頂時才向下積分。"""
+    if not cells or not _columns_vertically_dense(cells):
+        return False
+    for x, y in _bottom_cells(cells):
+        if _ground_top_below_cell(x, y, tile_size, world) is None:
+            return False
+    return True
+
+
+def _integral_shift_dy_to_ground(
+    curve: list[tuple[float, float]],
+    cells: set[tuple[int, int]],
+    tile_size: int,
+    world,
+) -> float:
+    """上包絡到元件下方地面的垂直距離（至少半格厚）。"""
+    curve_low = max(p[1] for p in curve)
+    ground_tops: list[float] = []
+    for x, y in _bottom_cells(cells):
+        g = _ground_top_below_cell(x, y, tile_size, world)
+        if g is not None:
+            ground_tops.append(g)
+    if not ground_tops:
+        return float(tile_size)
+    ground_top = min(ground_tops)
+    dy = ground_top - curve_low
+    return max(float(tile_size) * 0.5, dy)
+
+
+def build_floating_strip_from_upper_curve(
+    cells: set[tuple[int, int]], tile_size: int, world
+) -> list:
+    """未落地：薄帶浮在上包絡原位，不向下積分。"""
+    curve = _integral_upper_curve_from_cells(cells, tile_size)
+    if len(curve) < 2:
+        return []
+    thick = max(float(tile_size) * 0.85, 6.0)
+    bottom = [(x, y + thick) for x, y in reversed(curve)]
+    poly = list(curve) + bottom
+    return build_area_bodies_from_polygon(
+        poly,
+        world,
+        source_points=list(curve),
+        source_color_index=0,
+        damage_ref_radius=max(1.0, float(tile_size) * 2.0),
+        use_map_integral_visual=True,
+    )
+
+
 def _integral_upper_curve_from_cells(
     cells: set[tuple[int, int]], tile_size: int
 ) -> list[tuple[float, float]]:
@@ -188,12 +287,15 @@ def build_integral_strip_from_smoothed_upper_curve(
     cells: set[tuple[int, int]],
     tile_size: int,
     world,
-    screen_h: int,
+    screen_h: int | None = None,
 ) -> list:
+    del screen_h  # 保留參數以相容舊呼叫，不再用全螢幕向下填
+    if not component_should_integral_to_ground(cells, tile_size, world):
+        return build_floating_strip_from_upper_curve(cells, tile_size, world)
     curve = _integral_upper_curve_from_cells(cells, tile_size)
     if len(curve) < 2:
         return []
-    shift_dy = max(int(tile_size * 4), int(screen_h * 0.75))
+    shift_dy = _integral_shift_dy_to_ground(curve, cells, tile_size, world)
     return build_area_bodies_from_shifted_stroke(
         curve,
         0.0,

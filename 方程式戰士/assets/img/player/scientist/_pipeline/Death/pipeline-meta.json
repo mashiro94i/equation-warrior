@@ -1,0 +1,254 @@
+{
+  "target": "asset",
+  "mode": "death",
+  "prompt": "",
+  "role": "",
+  "input": "C:\\Users\\O0mashiro0O\\.cursor\\projects\\c-Users-O0mashiro0O-OneDrive-Desktop-code-Python\\assets\\scientist-death-raw.png",
+  "threshold": 100,
+  "edge_threshold": 150,
+  "duration": 200,
+  "rows": 2,
+  "cols": 3,
+  "cell_size": 128,
+  "fit_scale": 0.85,
+  "trim_border": 4,
+  "edge_clean_depth": 3,
+  "align": "feet",
+  "shared_scale": true,
+  "component_mode": "largest",
+  "component_padding": 0,
+  "min_component_area": 1,
+  "edge_touch_margin": 0,
+  "frame_labels": [
+    "death-1",
+    "death-2",
+    "death-3",
+    "death-4",
+    "death-5",
+    "death-6"
+  ],
+  "frames": [
+    {
+      "grid": [
+        0,
+        0
+      ],
+      "source_box": [
+        0,
+        0,
+        512,
+        512
+      ],
+      "component_mode": "largest",
+      "component_count": 11,
+      "selected_component_area": 46599,
+      "selected_component_bbox": [
+        153,
+        106,
+        420,
+        457
+      ],
+      "crop_bbox": [
+        153,
+        106,
+        420,
+        457
+      ],
+      "edge_touch": false,
+      "output_size": [
+        77,
+        101
+      ],
+      "paste_position": [
+        25,
+        18
+      ]
+    },
+    {
+      "grid": [
+        0,
+        1
+      ],
+      "source_box": [
+        512,
+        0,
+        1024,
+        512
+      ],
+      "component_mode": "largest",
+      "component_count": 1,
+      "selected_component_area": 49363,
+      "selected_component_bbox": [
+        71,
+        153,
+        413,
+        458
+      ],
+      "crop_bbox": [
+        71,
+        153,
+        413,
+        458
+      ],
+      "edge_touch": false,
+      "output_size": [
+        99,
+        88
+      ],
+      "paste_position": [
+        14,
+        31
+      ]
+    },
+    {
+      "grid": [
+        0,
+        2
+      ],
+      "source_box": [
+        1024,
+        0,
+        1536,
+        512
+      ],
+      "component_mode": "largest",
+      "component_count": 1,
+      "selected_component_area": 36227,
+      "selected_component_bbox": [
+        0,
+        335,
+        375,
+        463
+      ],
+      "crop_bbox": [
+        0,
+        335,
+        375,
+        463
+      ],
+      "edge_touch": true,
+      "output_size": [
+        108,
+        37
+      ],
+      "paste_position": [
+        10,
+        82
+      ]
+    },
+    {
+      "grid": [
+        1,
+        0
+      ],
+      "source_box": [
+        0,
+        512,
+        512,
+        1024
+      ],
+      "component_mode": "largest",
+      "component_count": 1,
+      "selected_component_area": 35102,
+      "selected_component_bbox": [
+        101,
+        183,
+        456,
+        316
+      ],
+      "crop_bbox": [
+        101,
+        183,
+        456,
+        316
+      ],
+      "edge_touch": false,
+      "output_size": [
+        102,
+        38
+      ],
+      "paste_position": [
+        13,
+        81
+      ]
+    },
+    {
+      "grid": [
+        1,
+        1
+      ],
+      "source_box": [
+        512,
+        512,
+        1024,
+        1024
+      ],
+      "component_mode": "largest",
+      "component_count": 1,
+      "selected_component_area": 37668,
+      "selected_component_bbox": [
+        61,
+        176,
+        420,
+        317
+      ],
+      "crop_bbox": [
+        61,
+        176,
+        420,
+        317
+      ],
+      "edge_touch": false,
+      "output_size": [
+        104,
+        40
+      ],
+      "paste_position": [
+        12,
+        79
+      ]
+    },
+    {
+      "grid": [
+        1,
+        2
+      ],
+      "source_box": [
+        1024,
+        512,
+        1536,
+        1024
+      ],
+      "component_mode": "largest",
+      "component_count": 1,
+      "selected_component_area": 37762,
+      "selected_component_bbox": [
+        19,
+        179,
+        380,
+        319
+      ],
+      "crop_bbox": [
+        19,
+        179,
+        380,
+        319
+      ],
+      "edge_touch": false,
+      "output_size": [
+        104,
+        40
+      ],
+      "paste_position": [
+        12,
+        79
+      ]
+    }
+  ],
+  "edge_touch_frames": [
+    [
+      0,
+      2
+    ]
+  ]
+}

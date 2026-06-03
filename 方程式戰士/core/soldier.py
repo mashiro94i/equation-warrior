@@ -657,6 +657,52 @@ class Soldier(pygame.sprite.Sprite):
             self.update_time = pygame.time.get_ticks()
 
     def update_animation(self):
+        if (
+            self.char_type == CharacterTypes.Player
+            and self.action == ActionTypes.JUMP
+        ):
+            frames = self.animation_list[self.action]
+            if len(frames) >= 2:
+                # 00=落地 jump-1；01=空中 jump-2（上升 vel_y<0 用空中格）
+                idx = 0 if self.vel_y >= 0 else 1
+                self.frame_index = idx
+                img = frames[idx]
+                ref = frames[1]
+                rh = ref.get_height()
+                if rh > 0 and img.get_height() != rh:
+                    nw = max(1, int(img.get_width() * rh / img.get_height()))
+                    img = pygame.transform.smoothscale(img, (nw, rh))
+                self.image = img
+                self._sync_sprite_size()
+                return
+        if (
+            self.char_type == CharacterTypes.Player
+            and self.action == ActionTypes.CAST
+        ):
+            frames = self.animation_list.get(ActionTypes.CAST) or []
+            if frames:
+                cd = int(getattr(self, "cast_animation_cooldown", 80))
+                now = pygame.time.get_ticks()
+                if now - self.update_time > cd:
+                    self.update_time = now
+                    if self.frame_index < len(frames) - 1:
+                        self.frame_index += 1
+                    else:
+                        self.cast_anim_active = False
+                        from .controller import EquationController
+
+                        if pygame.key.get_pressed()[EquationController.FUNCTION_AIM_KEY]:
+                            self.cast_anim_hold_last = True
+                        else:
+                            self.cast_anim_hold_last = False
+                if getattr(self, "cast_anim_hold_last", False):
+                    self.frame_index = len(frames) - 1
+                elif not getattr(self, "cast_anim_active", False):
+                    self.cast_anim_hold_last = False
+                self.frame_index = min(self.frame_index, len(frames) - 1)
+                self.image = frames[self.frame_index]
+                self._sync_sprite_size()
+                return
         if getattr(self, "_kenney_pair_anim", False) and self.action != ActionTypes.DEATH:
             frames = self.animation_list[self.action]
             if len(frames) >= 2:
@@ -676,6 +722,13 @@ class Soldier(pygame.sprite.Sprite):
             else:
                 self.frame_index = 0
         self.image = frames[self.frame_index]
+        if self.char_type == CharacterTypes.Player:
+            self._sync_sprite_size()
+
+    def _sync_sprite_size(self):
+        if self.image is not None:
+            self.width = self.image.get_width()
+            self.height = self.image.get_height()
 
     def draw(self, surface):
         img = self.image
@@ -711,6 +764,26 @@ class Player(Soldier):
         self.center_notice_text = ""
         # 0 次彩蛋「啵」：由主迴圈依此計數播放（測試可 assert）
         self.pop_sound_requests = 0
+        self.cast_anim_active = False
+        self.cast_anim_hold_last = False
+        self.cast_animation_cooldown = 80
+
+    def begin_cast_animation(self) -> None:
+        """發射後播放一次 Cast，播完停在最後格；若仍按住 1 鍵則維持最後格。"""
+        self.cast_anim_active = True
+        self.cast_anim_hold_last = False
+        self.update_action(ActionTypes.CAST)
+
+    def cast_animation_busy(self) -> bool:
+        return bool(self.cast_anim_active or self.cast_anim_hold_last)
+
+    def tick_cast_hold_release(self) -> None:
+        if not self.cast_anim_hold_last:
+            return
+        from .controller import EquationController
+
+        if not pygame.key.get_pressed()[EquationController.FUNCTION_AIM_KEY]:
+            self.cast_anim_hold_last = False
 
     @staticmethod
     def show_center_notice(player, text: str, now_ms: int | None = None, duration_ms: int = 2500) -> None:
@@ -1469,7 +1542,12 @@ class Enemy(Soldier):
             ):
                 return
             enemy_special.ai_area_sprayer_chase(
-                self, player, world, area_group, enemy_group,
+                self,
+                player,
+                world,
+                area_group,
+                enemy_bullet_group,
+                enemy_group,
             )
             return
         if ai_kind == "melee_tank":

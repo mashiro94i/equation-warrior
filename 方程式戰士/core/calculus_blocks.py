@@ -11,8 +11,15 @@ from .area_entity import (
 from .constants import (
     CALC_BLOCK_GRAVITY, CALC_BLOCK_H, CALC_BLOCK_INTEGRAL_H, CALC_BLOCK_W,
     INTEGRAL_XY_EXTEND_MAX_PX, SQUARE_SPLIT_ANGLE_DEG,
-    SCREEN_HEIGHT, SCREEN_WIDTH, WHITE,
+    SCREEN_HEIGHT, SCREEN_WIDTH, WHITE, YELLOW,
 )
+
+# 游標下方預覽：與 CalculusBlock 同版型，填色／描邊較淺、字為黃色
+_PREVIEW_FILL = (58, 58, 72, 200)
+_PREVIEW_BORDER = (200, 200, 215)
+_PREVIEW_BELOW_CURSOR_PX = 22
+_PREVIEW_SURF_CACHE: dict[tuple[str, str], pygame.Surface] = {}
+
 from . import game_audio
 from .enums import PowerType
 from .projectile import MathProjectile
@@ -129,6 +136,56 @@ class CalculusBlock(pygame.sprite.Sprite):
 
         if self.rect.top > SCREEN_HEIGHT + 40:
             self.kill()
+
+
+def _carried_preview_surface(kind: str, axis: str = "y") -> pygame.Surface:
+    key = (kind, axis.lower())
+    cached = _PREVIEW_SURF_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if kind == "integral":
+        h = CALC_BLOCK_INTEGRAL_H
+    else:
+        h = CALC_BLOCK_H
+    surf = pygame.Surface((CALC_BLOCK_W, h), pygame.SRCALPHA)
+    surf.fill(_PREVIEW_FILL)
+    pygame.draw.rect(surf, _PREVIEW_BORDER, surf.get_rect(), 2)
+    if kind == "derivative":
+        font = get_font(15, bold=True)
+        num = font.render("d", True, YELLOW)
+        den = font.render("dx", True, YELLOW)
+        cx = CALC_BLOCK_W // 2
+        surf.blit(num, num.get_rect(center=(cx, 9)))
+        pygame.draw.line(surf, YELLOW, (cx - 10, 13), (cx + 10, 13), 2)
+        surf.blit(den, den.get_rect(center=(cx, 20)))
+    elif kind == "square":
+        font = get_font(20, bold=True)
+        txt = font.render("x²", True, YELLOW)
+        surf.blit(txt, txt.get_rect(center=(CALC_BLOCK_W // 2, h // 2)))
+    elif kind == "sqrt":
+        font = get_font(20, bold=True)
+        txt = font.render("√x", True, YELLOW)
+        surf.blit(txt, txt.get_rect(center=(CALC_BLOCK_W // 2, h // 2)))
+    else:
+        font = get_font(22, bold=True)
+        label = "∫x" if axis.lower() == "x" else "∫y"
+        txt = font.render(label, True, YELLOW)
+        surf.blit(txt, txt.get_rect(center=(CALC_BLOCK_W // 2, h // 2)))
+    _PREVIEW_SURF_CACHE[key] = surf
+    return surf
+
+
+def draw_carried_block_preview(
+    screen: pygame.Surface,
+    game_x: int,
+    game_y: int,
+    kind: str,
+    axis: str = "y",
+) -> None:
+    """游標下方：淺色方塊 + 黃色符號（手形游標另由 assets 繪製）。"""
+    surf = _carried_preview_surface(kind, axis)
+    cy = int(game_y) + _PREVIEW_BELOW_CURSOR_PX + surf.get_height() // 2
+    screen.blit(surf, surf.get_rect(center=(int(game_x), cy)))
 
 
 def count_player_placed_calculus(group: pygame.sprite.Group) -> int:

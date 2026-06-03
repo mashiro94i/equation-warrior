@@ -161,6 +161,8 @@ class EquationController:
         )
         self.projectile_group.add(proj)
         self.last_fire_time = pygame.time.get_ticks()
+        if hasattr(self.player, "begin_cast_animation"):
+            self.player.begin_cast_animation()
         from . import game_audio
 
         game_audio.play_shot(at_rect=self.player.rect)
@@ -223,7 +225,7 @@ class EquationController:
             msg = "Cubic (deg 3): TODO 尚未實作"
             color = RED
         elif deg == 0:
-            msg = "次方 0：啵（無彈道，按住 1 發射）"
+            msg = "次方 0：啵"
             color = YELLOW
         if msg is None:
             return

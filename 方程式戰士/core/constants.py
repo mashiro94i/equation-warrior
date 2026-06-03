@@ -41,6 +41,16 @@ HP_DECIMAL_PLACES = 2
 # 角色貼圖縮放（Kenney / assets 動畫相對原圖；數字越大角色越大）
 PLAYER_VISUAL_SCALE = 3.0
 ENEMY_VISUAL_SCALE = 1.0
+# 科學家影格為 128px 格，Kenney 為 16px — 用此係數對齊約 48px 高（16 * PLAYER_VISUAL_SCALE）
+PLAYER_SCIENTIST_CELL_PX = 128
+PLAYER_KENNEY_TILE_PX = 16
+
+def player_scientist_visual_scale(base: float | None = None) -> float:
+    b = float(PLAYER_VISUAL_SCALE if base is None else base)
+    return b * (PLAYER_KENNEY_TILE_PX / PLAYER_SCIENTIST_CELL_PX)
+
+# 藥瓶貼圖相對科學家格圖的額外倍率（128px 源圖 × scientist_scale × 此值）
+POTION_PROJECTILE_SCALE_MULT = 0.65
 
 # 模式冷卻（毫秒）：離開該模式後鎖定
 COOLDOWN_MS_LEAVE_DERIV_BLOCK = 1000

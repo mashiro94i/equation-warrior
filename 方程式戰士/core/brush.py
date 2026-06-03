@@ -174,6 +174,7 @@ class BrushManager:
         self.current: Optional[BrushStroke] = None
         self.total_length = 0.0
         self._closed_loops_pending: List[Tuple[List[Tuple[float, float]], int]] = []
+        self._tap_circles_pending: List[Tuple[Tuple[float, float], int]] = []
         self.zone_center_x: float = SCREEN_WIDTH / 6.0
 
     def set_zone_center_x(self, player_cx: float) -> None:
@@ -229,8 +230,39 @@ class BrushManager:
         self._closed_loops_pending = []
         return out
 
-    def end_stroke(self):
-        self.current = None
+    def drain_tap_circles(self):
+        out = self._tap_circles_pending
+        self._tap_circles_pending = []
+        return out
+
+    @staticmethod
+    def _is_tap(stroke: BrushStroke, mx: float, my: float, tap_ref_width: float) -> bool:
+        if stroke.closed or len(stroke.points) < 1:
+            return False
+        lim = max(8.0, float(tap_ref_width))
+        sx, sy = stroke.points[0]
+        if _seg_len(mx, my, sx, sy) > lim:
+            return False
+        if stroke.length >= lim:
+            return False
+        if len(stroke.points) >= 4:
+            lx, ly = stroke.points[-1]
+            if _seg_len(lx, ly, sx, sy) <= 12:
+                return False
+        return True
+
+    def end_stroke(
+        self,
+        mx: float | None = None,
+        my: float | None = None,
+        tap_ref_width: float = 36.0,
+    ):
+        stroke = self.current
+        if stroke is not None:
+            if mx is not None and my is not None and self._is_tap(stroke, mx, my, tap_ref_width):
+                self._tap_circles_pending.append((stroke.points[0], stroke.color_index))
+                self.remove_stroke(stroke)
+            self.current = None
 
     def remove_stroke(self, stroke: BrushStroke):
         if stroke in self.strokes:

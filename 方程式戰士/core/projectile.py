@@ -7,12 +7,18 @@ from .constants import (
     ENEMY_BULLET_DAMAGE,
     GREEN, HEAL_SIGMOID_HEAL_AMOUNT,
     INTEGRAL_HIT_BULLET_DAMAGE_MULT, INTEGRAL_HIT_BULLET_RADIUS_MULT,
-    INTEGRAL_XY_EXTEND_MAX_PX, PURPLE, RED,
+    INTEGRAL_XY_EXTEND_MAX_PX, POTION_PROJECTILE_SCALE_MULT,
+    PURPLE, RED,
     SCREEN_HEIGHT, SCREEN_WIDTH, YELLOW,
     player_attack_hit_damage,
+    player_scientist_visual_scale,
 )
+from .assets import load_potion_projectile_frames
+from .assets import scientist_sprites_available
 from .enums import IntegralAxis, PowerType
 from .equation import Equation
+
+_POTION_FRAMES: list | None = None
 
 
 class MathProjectile(pygame.sprite.Sprite):
@@ -45,6 +51,16 @@ class MathProjectile(pygame.sprite.Sprite):
             self.rect = self.image.get_rect(center=(self.origin[0], self.origin[1] + y0))
 
     def _rebuild_bullet_image(self):
+        global _POTION_FRAMES
+        if _POTION_FRAMES is None:
+            pot_scale = player_scientist_visual_scale() * (
+                POTION_PROJECTILE_SCALE_MULT if scientist_sprites_available() else 1.0
+            )
+            _POTION_FRAMES = load_potion_projectile_frames(pot_scale)
+        if _POTION_FRAMES and not self.healing_shot:
+            idx = int(pygame.time.get_ticks() // 120) % len(_POTION_FRAMES)
+            self.image = _POTION_FRAMES[idx]
+            return
         r = max(3, int(self._bullet_radius))
         d = r * 2 + 2
         self.image = pygame.Surface((d, d), pygame.SRCALPHA)
