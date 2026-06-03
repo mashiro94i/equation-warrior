@@ -80,11 +80,23 @@ def archetype_for_gid(gid: int) -> EnemyArchetype | None:
         )
     if g == GID_NEGATIVE_ONE:
         return EnemyArchetype(
-            1.0, head_label="-1", alpha=153, chase_aggressive=True, ai="neg_one",
-            only_heal_bullet_hurt=True,
+            1.0,
+            head_label="i",
+            alpha=178,
+            chase_aggressive=True,
+            ai="imaginary",
+            ghost_walls=True,
+            ghost_area=True,
         )
     if g == GID_GIANT_256:
-        return EnemyArchetype(256.0, head_label="256", speed_mult=0.25, ai="giant_256", chase_aggressive=True)
+        return EnemyArchetype(
+            256.0,
+            head_label="256",
+            speed_mult=0.25,
+            ai="chase_melee",
+            chase_aggressive=True,
+            melee_bump=True,
+        )
     if g == GID_EXP_X:
         return EnemyArchetype(
             math.exp(5),

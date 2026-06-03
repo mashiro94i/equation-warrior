@@ -629,6 +629,8 @@ class Soldier(pygame.sprite.Sprite):
         if self.char_type == CharacterTypes.Player:
             from . import game_audio
 
+            if self.is_alive and self.action != ActionTypes.DEATH:
+                self.begin_hurt_animation()
             game_audio.play_player_hurt(at_rect=self.rect)
         elif self.char_type == CharacterTypes.Enemy:
             from . import game_audio
@@ -657,6 +659,24 @@ class Soldier(pygame.sprite.Sprite):
             self.update_time = pygame.time.get_ticks()
 
     def update_animation(self):
+        if (
+            self.char_type == CharacterTypes.Player
+            and self.action == ActionTypes.HURT
+        ):
+            frames = self.animation_list.get(ActionTypes.HURT) or []
+            if frames:
+                cd = int(getattr(self, "hurt_animation_cooldown", 75))
+                now = pygame.time.get_ticks()
+                if now - self.update_time > cd:
+                    self.update_time = now
+                    if self.frame_index < len(frames) - 1:
+                        self.frame_index += 1
+                    else:
+                        self.hurt_anim_active = False
+                self.frame_index = min(self.frame_index, len(frames) - 1)
+                self.image = frames[self.frame_index]
+                self._sync_sprite_size()
+                return
         if (
             self.char_type == CharacterTypes.Player
             and self.action == ActionTypes.JUMP
@@ -767,6 +787,21 @@ class Player(Soldier):
         self.cast_anim_active = False
         self.cast_anim_hold_last = False
         self.cast_animation_cooldown = 80
+        self.hurt_anim_active = False
+        self.hurt_animation_cooldown = 75
+
+    def begin_hurt_animation(self) -> None:
+        """受傷時播放 Hurt 序列（播完前優先於跑／跳／施法）。"""
+        frames = self.animation_list.get(ActionTypes.HURT) or []
+        if not frames:
+            return
+        self.hurt_anim_active = True
+        self.cast_anim_active = False
+        self.cast_anim_hold_last = False
+        self.update_action(ActionTypes.HURT)
+
+    def hurt_animation_busy(self) -> bool:
+        return bool(getattr(self, "hurt_anim_active", False))
 
     def begin_cast_animation(self) -> None:
         """發射後播放一次 Cast，播完停在最後格；若仍按住 1 鍵則維持最後格。"""
@@ -809,6 +844,7 @@ class Player(Soldier):
         self._long_fall_sfx_played = False
         self.rect.center = (int(x), int(y))
         self.frame_index = 0
+        self.hurt_anim_active = False
         self.update_action(ActionTypes.IDLE)
 
     def move(self, moving_left, moving_right, world, area_group=None, enemy_group=None, background_scroll=0):

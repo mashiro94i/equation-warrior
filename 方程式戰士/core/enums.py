@@ -30,6 +30,7 @@ class ActionTypes(Enum):
     RUN = "Run"
     JUMP = "Jump"
     CAST = "Cast"
+    HURT = "Hurt"
     DEATH = "Death"
 
 

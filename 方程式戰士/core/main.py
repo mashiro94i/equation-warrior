@@ -177,10 +177,28 @@ def main():
     font_large = get_font(48, bold=True)
     font_med = get_font(24, bold=True)
 
-    def present_screen() -> None:
+    def present_screen(*, flatten_focus: bool = False) -> None:
         window.fill((0, 0, 0))
-        scaled = pygame.transform.smoothscale(screen, (view_w, view_h))
-        window.blit(scaled, (view_x, view_y))
+        if (
+            flatten_focus
+            and player is not None
+            and player_is_flattened
+            and state in (GameState.PLAYING, GameState.DEATH)
+        ):
+            z = FLATTEN_VIEW_ZOOM
+            sw = max(view_w + 1, int(view_w * z))
+            sh = max(view_h + 1, int(view_h * z))
+            big = pygame.transform.smoothscale(screen, (sw, sh))
+            prx = player.rect.centerx / SCREEN_WIDTH
+            pry = player.rect.centery / SCREEN_HEIGHT
+            bx = int(prx * sw)
+            by = int(pry * sh)
+            src_x = max(0, min(bx - view_w // 2, sw - view_w))
+            src_y = max(0, min(by - view_h // 2, sh - view_h))
+            window.blit(big, (view_x, view_y), pygame.Rect(src_x, src_y, view_w, view_h))
+        else:
+            scaled = pygame.transform.smoothscale(screen, (view_w, view_h))
+            window.blit(scaled, (view_x, view_y))
         pygame.display.update()
 
     def pump_boot_events() -> bool:
@@ -235,8 +253,9 @@ def main():
     area_fling_mouse_end_my = 0.0
     area_drag_fling_anchor_mx = 0.0
     area_drag_fling_anchor_my = 0.0
-    player_flatten_until_ms = 0
+    player_is_flattened = False
     player_crush_kill_at_ms = 0
+    FLATTEN_VIEW_ZOOM = 1.38
 
     state = GameState.MENU
     level = 1
@@ -362,6 +381,24 @@ def main():
     def align_camera_to_player():
         """開局／換關／重載後，讓玩家出現在螢幕上對應捲動位置。"""
         align_camera_to_world_x(player.rect.centerx)
+
+    def align_camera_center_player() -> None:
+        """壓扁時：玩家維持在畫面水平中央。"""
+        if world is None or player is None:
+            return
+        scroll_max = world.scroll_max_px(SCREEN_WIDTH)
+        desired = int(player.rect.centerx) - SCREEN_WIDTH // 2
+        desired = max(0, min(desired, scroll_max))
+        delta = desired - background_scroll
+        if delta != 0:
+            shift_world(-delta)
+            player.rect.x -= delta
+        background_scroll = desired
+
+    def reset_player_crush_state() -> None:
+        nonlocal player_is_flattened, player_crush_kill_at_ms
+        player_is_flattened = False
+        player_crush_kill_at_ms = 0
 
     def underwater_ambient_visible() -> bool:
         view = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
@@ -534,9 +571,10 @@ def main():
         health_bar = HealthBar(10, 10, player.max_health)
         controller = EquationController(player, projectile_group)
         sigma_schedule.clear()
-        game_audio.stop_bubble_repeat()
+        game_audio.stop_all_sfx()
         last_spike_damage_ms = 0
         normalize_player_for_level()
+        reset_player_crush_state()
         align_camera_to_player()
 
     def begin_playing_at(selected_level: int):
@@ -571,7 +609,7 @@ def main():
         health_bar = HealthBar(10, 10, player.max_health)
         controller = EquationController(player, projectile_group)
         sigma_schedule.clear()
-        game_audio.stop_bubble_repeat()
+        game_audio.stop_all_sfx()
         last_spike_damage_ms = 0
         normalize_player_for_level()
         state = GameState.PLAYING
@@ -581,6 +619,7 @@ def main():
         is_left = is_right = False
         menu_page = "main"
         menu_click_lock = True
+        reset_player_crush_state()
         align_camera_to_player()
 
     while running:
@@ -897,6 +936,9 @@ def main():
                         pass
 
         elif state == GameState.PLAYING:
+            if player_is_flattened:
+                align_camera_center_player()
+                is_left = is_right = False
             draw_parallax_background(screen, background_scroll)
             world.update_animated_tiles(now_ms)
             world.draw_obstacles(screen)
@@ -929,7 +971,7 @@ def main():
                 pygame.draw.rect(screen, (255, 255, 255), (_zx, _zy, zone_w, zone_h), 2)
 
             if player.is_alive:
-                if now_ms < player_flatten_until_ms:
+                if player_is_flattened:
                     is_left = is_right = False
                 if player_crush_kill_at_ms and now_ms >= player_crush_kill_at_ms:
                     player.health = 0.0
@@ -971,7 +1013,10 @@ def main():
                     player.rect.x -= background_scroll
                     background_scroll = 0
                 player.tick_cast_hold_release()
-                if player.cast_animation_busy():
+                if player.hurt_animation_busy():
+                    player.update_action(ActionTypes.HURT)
+                    player.is_x_flip = player.facing == -1
+                elif player.cast_animation_busy():
                     player.update_action(ActionTypes.CAST)
                     player.is_x_flip = player.facing == -1
                 elif player.is_in_air:
@@ -1007,8 +1052,11 @@ def main():
                 if getattr(enemy, "pending_crush_player", False):
                     zone = enemy.rect.inflate(TILE_SIZE * 2, TILE_SIZE)
                     if player.rect.colliderect(zone):
-                        player_flatten_until_ms = now_ms + 1500
+                        player_is_flattened = True
                         player_crush_kill_at_ms = now_ms + 2500
+                        controller.force_idle()
+                        brush_manager.end_stroke()
+                        reset_area_drag()
                     enemy.pending_crush_player = False
                 enemy._nearby_derivative_blocks = tuple(derivative_group.sprites())
                 enemy._nearby_integral_blocks = tuple(integral_group.sprites())
@@ -1248,7 +1296,7 @@ def main():
                     health_bar = HealthBar(10, 10, player.max_health)
                     controller = EquationController(player, projectile_group)
                     sigma_schedule.clear()
-                    game_audio.stop_bubble_repeat()
+                    game_audio.stop_all_sfx()
                     last_spike_damage_ms = 0
                     normalize_player_for_level()
                     is_opening = True
@@ -1268,7 +1316,7 @@ def main():
                 enemy.draw(screen)
                 if enemy.is_alive:
                     blit_enemy_head_label(screen, font_small, enemy, WHITE)
-            if now_ms < player_flatten_until_ms:
+            if player_is_flattened:
                 flat = player.image.copy()
                 fw = max(4, int(flat.get_width()))
                 fh = max(2, int(flat.get_height() * 0.22))
@@ -1438,7 +1486,7 @@ def main():
             heart_group.draw(screen)
             for enemy in enemy_group:
                 enemy.draw(screen)
-            if now_ms < player_flatten_until_ms:
+            if player_is_flattened:
                 flat = player.image.copy()
                 fw = max(4, int(flat.get_width()))
                 fh = max(2, int(flat.get_height() * 0.22))
@@ -1525,7 +1573,7 @@ def main():
                     elif event.key == pygame.K_d:
                         is_right = True
                     elif event.key == pygame.K_w:
-                        if not player.is_in_air:
+                        if not player_is_flattened and not player.is_in_air:
                             player.is_jump = True
                     else:
                         lvl_cfg = get_level_mode_config(level)
@@ -1710,10 +1758,7 @@ def main():
                     if player.game_mode == PlayerMode.BRUSH:
                         brush_manager.extend_stroke(*mouse_to_game(event.pos))
 
-        window.fill((0, 0, 0))
-        scaled = pygame.transform.smoothscale(screen, (view_w, view_h))
-        window.blit(scaled, (view_x, view_y))
-        pygame.display.update()
+        present_screen(flatten_focus=True)
 
     persist_settings()
     pygame.quit()

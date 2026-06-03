@@ -23,6 +23,16 @@ _SIN_LABELS = ("sin(x)", "cos(x)", "-sin(x)")
 # 65822 暴走：降低每輪發數與頻率，避免彈幕過密卡頓
 AREA_SPRAYER_RAMPAGE_BURST_MS = 120
 AREA_SPRAYER_RAMPAGE_BULLETS = 6
+NEG_ONE_SHOOT_CD_MULT = 0.4
+IMAGINARY_SINE_AMP_PX = 28.0
+IMAGINARY_SINE_PERIOD_MS = 2200
+# 子彈穿透虛數／−1 時仍顯示（略淡＋淡藍描邊）；過低會像「隱形彈」
+PROJECTILE_PASS_THROUGH_ALPHA = 155
+IMAGINARY_DRAIN_RANGE_PX = TILE_SIZE * 3.5
+IMAGINARY_DRAIN_INTERVAL_MS = 1000
+GIANT_HP_FACTOR_MIN = 4.0
+GIANT_SCALE_FACTOR_MIN = 0.32
+GIANT_SQRT_SHRINK_KEEP = 0.62
 SIN_LUNGE_TILES = 4
 SIN_STUN_MS = 5000
 SIN_STANDOFF_MIN_TILES = 2.0
@@ -66,6 +76,7 @@ def is_flying_enemy(enemy) -> bool:
         is_sin_wave_enemy(enemy)
         or is_exp_flyer_enemy(enemy)
         or is_area_sprayer_enemy(enemy)
+        or is_imaginary_enemy(enemy)
     )
 
 
@@ -124,7 +135,7 @@ def apply_archetype_to_enemy(enemy) -> None:
     if enemy.enemy_gid == GID_TINY_FRACTION:
         enemy.math_label = "0.01"
     if enemy.enemy_gid == GID_NEGATIVE_ONE:
-        enemy.math_label = "-1"
+        _init_enemy_imaginary_state(enemy)
     if is_exp_flyer_enemy(enemy) or is_area_sprayer_enemy(enemy):
         enemy.vel_y = 0.0
         enemy.is_in_air = False
@@ -151,6 +162,10 @@ def apply_archetype_to_enemy(enemy) -> None:
         enemy._giant_base_max_hp = float(arch.max_hp)
         enemy._giant_base_speed_mult = float(arch.speed_mult)
         enemy._giant_base_scale = float(arch.scale_mult)
+        enemy._giant_hp_factor = 1.0
+        enemy._giant_scale_factor = 1.0
+        enemy._giant_grown_until_ms = 0
+        enemy._giant_reverting = False
 
 
 def _refresh_appearance(enemy) -> None:
@@ -172,8 +187,42 @@ def _projectile_is_healing(proj) -> bool:
     )
 
 
+def is_imaginary_enemy(enemy) -> bool:
+    return getattr(enemy, "ai_kind", "") == "imaginary"
+
+
+def projectile_passes_through_enemy(enemy, proj) -> bool:
+    """虛數 i 或 −1 對非治療彈：子彈穿透不阻擋。"""
+    if not enemy.is_alive:
+        return False
+    if is_imaginary_enemy(enemy):
+        return True
+    if getattr(enemy, "only_heal_bullet_hurt", False):
+        return not _projectile_is_healing(proj)
+    return False
+
+
+def mark_projectile_passed_through(proj) -> None:
+    """穿透虛數／−1：子彈繼續飛行，略透明並加淡藍圈（避免像隱形彈）。"""
+    target = PROJECTILE_PASS_THROUGH_ALPHA
+    if int(getattr(proj, "_pass_through_ghost_alpha", 255)) <= target:
+        return
+    proj._pass_through_ghost_alpha = target
+    base = proj.image.copy()
+    base.set_alpha(target)
+    w, h = base.get_size()
+    out = pygame.Surface((w, h), pygame.SRCALPHA)
+    out.blit(base, (0, 0))
+    cx, cy = w // 2, h // 2
+    r = max(3, min(cx, cy) - 1)
+    pygame.draw.circle(out, (160, 210, 255, 200), (cx, cy), r, 2)
+    proj.image = out
+
+
 def can_take_projectile_damage(enemy, proj) -> bool:
     if not enemy.is_alive:
+        return False
+    if projectile_passes_through_enemy(enemy, proj):
         return False
     if getattr(enemy, "invincible", False):
         return False
@@ -352,16 +401,27 @@ def _tiny_fraction_algebra(enemy, kind: str) -> None:
             enemy.shoot_cd_mult = 1.0 / 5.0
 
 
+def _init_enemy_imaginary_state(enemy) -> None:
+    """65823 預設為虛數 i 態（顯示 i、穿牆漂浮）。"""
+    enemy.math_label = "i"
+    enemy.head_label = "i"
+    enemy.ghost_walls = True
+    enemy.ghost_area = True
+    enemy.alpha = 178
+    enemy.only_heal_bullet_hurt = False
+    enemy.ai_kind = "imaginary"
+    enemy.vel_y = 0.0
+    enemy.is_in_air = False
+    enemy._imag_wave_phase = random.uniform(0.0, math.tau)
+    enemy._imag_last_off_y = 0
+    enemy._imag_wave_ms = pygame.time.get_ticks()
+    enemy._imag_float_y = float(enemy.rect.centery)
+
+
 def _neg_one_algebra(enemy, kind: str) -> None:
-    label = getattr(enemy, "math_label", "-1")
+    label = getattr(enemy, "math_label", "i")
     if kind == "sqrt" and label == "-1":
-        enemy.math_label = "i"
-        enemy.head_label = "i"
-        enemy.ghost_walls = True
-        enemy.ghost_area = True
-        enemy.alpha = 178
-        enemy.only_heal_bullet_hurt = False
-        enemy.ai_kind = "imaginary"
+        _init_enemy_imaginary_state(enemy)
     elif kind == "square" and label == "i":
         enemy.math_label = "-1"
         enemy.head_label = "-1"
@@ -372,27 +432,47 @@ def _neg_one_algebra(enemy, kind: str) -> None:
         enemy.ai_kind = "neg_one"
 
 
+def _apply_giant_scaled_stats(enemy, *, hp_ratio: float | None = None) -> None:
+    """依累積倍率更新巨像 HP／體型（不再定時還原）。"""
+    base_hp = float(getattr(enemy, "_giant_base_max_hp", 256.0))
+    base_sc = float(getattr(enemy, "_giant_base_scale", 1.0))
+    base_spd = float(getattr(enemy, "_giant_base_speed_mult", 0.25))
+    hp_f = max(GIANT_HP_FACTOR_MIN / base_hp, float(getattr(enemy, "_giant_hp_factor", 1.0)))
+    sc_f = max(GIANT_SCALE_FACTOR_MIN, float(getattr(enemy, "_giant_scale_factor", 1.0)))
+    enemy._giant_hp_factor = hp_f
+    enemy._giant_scale_factor = sc_f
+    old_max = float(enemy.max_health)
+    old_hp = float(enemy.health)
+    ratio = (old_hp / old_max) if old_max > 0 else 1.0
+    if hp_ratio is not None:
+        ratio = float(hp_ratio)
+    enemy.max_health = max(GIANT_HP_FACTOR_MIN, base_hp * hp_f)
+    enemy.health = min(enemy.max_health, max(1.0, enemy.max_health * ratio))
+    enemy.scale_mult = max(GIANT_SCALE_FACTOR_MIN, base_sc * sc_f)
+    enemy.speed_mult = max(0.08, base_spd * (1.0 / sc_f))
+    enemy.head_label = str(int(round(enemy.max_health)))
+    enemy._giant_grown_until_ms = 0
+    enemy._giant_reverting = False
+    _refresh_appearance(enemy)
+
+
 def _giant_algebra(enemy, kind: str) -> None:
     from . import game_audio
 
-    old_max = float(enemy.max_health)
-    old_hp = float(enemy.health)
     if kind in ("square", "sqrt"):
         game_audio.play_giant_crush(at_rect=enemy.rect)
     if kind == "square":
         enemy.pending_crush_player = True
-        enemy.max_health = old_max * 2.0
-        enemy.health = enemy.max_health - old_max + old_hp
-        enemy.speed_mult = getattr(enemy, "_giant_base_speed_mult", 0.25) * 0.5
-        enemy.scale_mult = getattr(enemy, "_giant_base_scale", 1.0) * 1.3
-        enemy.head_label = str(int(round(enemy.max_health)))
-        enemy._giant_grown_until_ms = pygame.time.get_ticks() + 1500
+        enemy._giant_hp_factor = float(getattr(enemy, "_giant_hp_factor", 1.0)) * 2.0
+        enemy._giant_scale_factor = float(getattr(enemy, "_giant_scale_factor", 1.0)) * 1.3
+        _apply_giant_scaled_stats(enemy)
     elif kind == "sqrt":
-        enemy.max_health = max(1.0, old_max * 0.5)
-        enemy.health = max(enemy.max_health, old_hp)
-        enemy.speed_mult = getattr(enemy, "_giant_base_speed_mult", 0.25) * 2.0
-        enemy.scale_mult = getattr(enemy, "_giant_base_scale", 1.0) / 1.3
-        enemy.head_label = str(int(round(enemy.max_health)))
+        hp_f = float(getattr(enemy, "_giant_hp_factor", 1.0)) * 0.5
+        sc_f = float(getattr(enemy, "_giant_scale_factor", 1.0))
+        excess = max(0.0, sc_f - GIANT_SCALE_FACTOR_MIN)
+        enemy._giant_hp_factor = max(GIANT_HP_FACTOR_MIN / float(getattr(enemy, "_giant_base_max_hp", 256.0)), hp_f)
+        enemy._giant_scale_factor = GIANT_SCALE_FACTOR_MIN + excess * GIANT_SQRT_SHRINK_KEEP
+        _apply_giant_scaled_stats(enemy)
 
 
 def _sin_algebra(enemy, kind: str) -> None:
@@ -519,17 +599,6 @@ def update_enemy_special(enemy, player, world, enemy_bullet_group, area_group, n
             _tick_sin_wave_stun_move(enemy, world)
         enemy.update_action(ActionTypes.IDLE)
         return
-    if enemy.enemy_gid == GID_GIANT_256:
-        grown_until = getattr(enemy, "_giant_grown_until_ms", 0)
-        if grown_until and now_ms >= grown_until and not getattr(enemy, "_giant_reverting", False):
-            enemy._giant_reverting = True
-            enemy.max_health = float(getattr(enemy, "_giant_base_max_hp", 256))
-            enemy.health = min(enemy.health, enemy.max_health)
-            enemy.speed_mult = float(getattr(enemy, "_giant_base_speed_mult", 0.25))
-            enemy.scale_mult = float(getattr(enemy, "_giant_base_scale", 1.0))
-            enemy.head_label = "256"
-            enemy._giant_grown_until_ms = 0
-            _refresh_appearance(enemy)
     if getattr(enemy, "ai_kind", "") == "imaginary":
         _imaginary_drain(player, enemy, now_ms)
 
@@ -774,23 +843,42 @@ def ai_calc_tank_priority_move(enemy, player, world, area_group, enemy_group=Non
 
 
 def _imaginary_drain(player, enemy, now_ms: int) -> None:
+    """虛數 i 近身光環傷害（非敵彈）；與穿透我方子彈無關。"""
     if not player.is_alive:
         return
     dist = math.hypot(
         player.rect.centerx - enemy.rect.centerx,
         player.rect.centery - enemy.rect.centery,
     )
-    if dist > TILE_SIZE * 5:
+    if dist > IMAGINARY_DRAIN_RANGE_PX:
         return
     last = getattr(enemy, "_imaginary_drain_ms", 0)
-    if now_ms - last < 1000:
+    if now_ms - last < IMAGINARY_DRAIN_INTERVAL_MS:
         return
     enemy._imaginary_drain_ms = now_ms
     player.take_damage(player.max_health / 20.0)
+    player.center_notice_text = "虛數侵蝕"
+    player.center_notice_until_ms = int(now_ms) + 700
+
+
+def _apply_imaginary_sine_drift(enemy) -> None:
+    """虛數態：疊加緩慢上下正弦偏移（穿牆時仍有效）。"""
+    now_ms = pygame.time.get_ticks()
+    last_ms = int(getattr(enemy, "_imag_wave_ms", now_ms))
+    dt = max(0.0, (now_ms - last_ms) / 1000.0)
+    enemy._imag_wave_ms = now_ms
+    phase = float(getattr(enemy, "_imag_wave_phase", 0.0))
+    period_s = max(0.2, IMAGINARY_SINE_PERIOD_MS / 1000.0)
+    phase += dt * (2.0 * math.pi / period_s)
+    enemy._imag_wave_phase = phase
+    new_off = int(round(IMAGINARY_SINE_AMP_PX * math.sin(phase)))
+    prev_off = int(getattr(enemy, "_imag_last_off_y", 0))
+    enemy.rect.y += new_off - prev_off
+    enemy._imag_last_off_y = new_off
 
 
 def ai_imaginary(enemy, player, world, area_group, enemy_group=None) -> None:
-    """虛數態：在玩家附近徘徊。"""
+    """虛數態：穿牆、子彈穿透，在玩家附近徘徊並上下正弦漂移。"""
     from .enums import ActionTypes
 
     cx, cy = player.rect.centerx, player.rect.centery
@@ -810,7 +898,13 @@ def ai_imaginary(enemy, player, world, area_group, enemy_group=None) -> None:
     enemy.direction = 1 if cx >= ex else -1
     enemy.facing = enemy.direction
     ai_left, ai_right, ledge = enemy._apply_chase_move(
-        player, world, area_group, ai_left, ai_right, enemy_group=enemy_group,
+        player,
+        world,
+        area_group,
+        ai_left,
+        ai_right,
+        enemy_group=enemy_group,
+        skip_ledge_brake=True,
     )
     if ledge:
         enemy.update_action(ActionTypes.IDLE)
@@ -818,6 +912,8 @@ def ai_imaginary(enemy, player, world, area_group, enemy_group=None) -> None:
         enemy.update_action(ActionTypes.RUN)
     else:
         enemy.update_action(ActionTypes.IDLE)
+    _apply_imaginary_sine_drift(enemy)
+    enemy._imag_float_y = float(enemy.rect.centery)
 
 
 def spawn_enemy_bullet_at_player(enemy, bullet_group, player) -> None:

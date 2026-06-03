@@ -130,11 +130,18 @@ class MathProjectile(pygame.sprite.Sprite):
                     return
         for enemy in list(enemy_group):
             if enemy.is_alive and pygame.sprite.collide_rect(self, enemy):
-                from .enemy_special import can_take_projectile_damage, on_projectile_hit
+                from .enemy_special import (
+                    can_take_projectile_damage,
+                    mark_projectile_passed_through,
+                    on_projectile_hit,
+                    projectile_passes_through_enemy,
+                )
 
+                if projectile_passes_through_enemy(enemy, self):
+                    mark_projectile_passed_through(self)
+                    continue
                 if not can_take_projectile_damage(enemy, self):
-                    self.kill()
-                    return
+                    continue
                 eid = id(enemy)
                 if self.healing_shot:
                     on_projectile_hit(enemy, self)
@@ -251,13 +258,20 @@ class NumericProjectile(pygame.sprite.Sprite):
                     return
         for enemy in list(enemy_group):
             if enemy.is_alive and pygame.sprite.collide_rect(self, enemy):
-                from .enemy_special import can_take_projectile_damage, on_projectile_hit
+                from .enemy_special import (
+                    can_take_projectile_damage,
+                    mark_projectile_passed_through,
+                    on_projectile_hit,
+                    projectile_passes_through_enemy,
+                )
 
-                if can_take_projectile_damage(enemy, self):
-                    if self.hit_damage > 0:
-                        on_projectile_hit(enemy, self)
-                self.kill()
-                return
+                if projectile_passes_through_enemy(enemy, self):
+                    mark_projectile_passed_through(self)
+                    continue
+                if can_take_projectile_damage(enemy, self) and self.hit_damage > 0:
+                    on_projectile_hit(enemy, self)
+                    self.kill()
+                    return
 
 
 class EnemyBullet(pygame.sprite.Sprite):
