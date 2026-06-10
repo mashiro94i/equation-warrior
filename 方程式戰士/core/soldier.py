@@ -21,6 +21,7 @@ from .constants import (
 )
 from .enums import ActionTypes, CharacterTypes, IntegralAxis, PlayerMode
 from .gameplay import clamp_degree, round_hp
+from .perf import iter_obstacles_in_probe
 from .map_tile_loader import surface_for_gid
 from .projectile import EnemyBullet
 
@@ -69,12 +70,44 @@ ENEMY_KENNEY_TILE_RGB = {
 
 def player_standing_on_enemy_head(player, enemy) -> bool:
     """玩家踩在敵人頭頂（橫向足夠重疊、腳底貼敵頂）時為 True。"""
-    overlap_w = min(player.rect.right, enemy.rect.right) - max(player.rect.left, enemy.rect.left)
+    from .enemy_special import enemy_body_rect, player_can_stand_on_enemy
+
+    if not player_can_stand_on_enemy(enemy):
+        return False
+    body = enemy_body_rect(enemy)
+    overlap_w = min(player.rect.right, body.right) - max(player.rect.left, body.left)
     min_w = max(6, int(player.rect.width * 0.22))
     if overlap_w < min_w:
         return False
-    dy = player.rect.bottom - enemy.rect.top
+    dy = player.rect.bottom - body.top
     return -8 <= dy <= 14
+
+
+def _enemy_blocks_player_fully(enemy) -> bool:
+    """僅臨界巨像：上下左右皆阻擋玩家。"""
+    if not getattr(enemy, "is_alive", True):
+        return False
+    from .enemy_special import is_giant_colossus_enemy
+
+    return is_giant_colossus_enemy(enemy)
+
+
+def _enemy_allows_player_stand(enemy) -> bool:
+    """可踩在頭上的敵人（不含小數幽浮、巨像、幽靈）。"""
+    if not getattr(enemy, "is_alive", True):
+        return False
+    from .enemy_archetypes import is_tiny_fraction_enemy
+    from .enemy_special import player_can_stand_on_enemy
+
+    if is_tiny_fraction_enemy(enemy):
+        return False
+    return player_can_stand_on_enemy(enemy)
+
+
+def _enemy_body_for_player_collision(enemy) -> pygame.Rect:
+    from .enemy_special import enemy_body_rect
+
+    return enemy_body_rect(enemy)
 
 
 class Soldier(pygame.sprite.Sprite):
@@ -159,11 +192,103 @@ class Soldier(pygame.sprite.Sprite):
     def _solid_body_blocks_rect(self, test_rect, world, area_group, enemy_group=None, player_ref=None):
         if self._collides_with_world_or_area(test_rect, world, area_group):
             return True
-        # 玩家與敵人：僅水平阻擋（見 move），垂直可穿越，避免跳躍時被擠進牆裡
+        if self.char_type == CharacterTypes.Player and enemy_group is not None:
+            for e in enemy_group:
+                if not _enemy_blocks_player_fully(e):
+                    continue
+                if _enemy_body_for_player_collision(e).colliderect(test_rect):
+                    return True
         if self.char_type == CharacterTypes.Enemy and player_ref is not None:
-            if player_ref.is_alive and player_ref.rect.colliderect(test_rect):
+            if self._player_blocks_enemy_rect(player_ref, test_rect):
                 return True
         return False
+
+    def _player_blocks_enemy_rect(self, player, test_rect: pygame.Rect) -> bool:
+        """近戰衝撞時允許貼身重疊，避免太近反而打不到玩家。"""
+        if not player.is_alive or not player.rect.colliderect(test_rect):
+            return False
+        from .enemy_special import player_on_giant_head
+
+        if (
+            player_standing_on_enemy_head(player, self)
+            or player_on_giant_head(player, self)
+        ):
+            return False
+        if getattr(self, "uses_melee_bump", False):
+            bumping = int(getattr(self, "_bump_ticks_remaining", 0)) > 0
+            if bumping or self._melee_in_attack_range(player):
+                return False
+        return True
+
+    def _player_deeply_stuck_in_world(self, world) -> bool:
+        """中心點在磚內，或與磚大幅重疊（避免邊緣貼地誤觸發）。"""
+        cx, cy = self.rect.centerx, self.rect.centery
+        for _img, rect in world.obstacle_list:
+            if rect.collidepoint(cx, cy):
+                return True
+        min_area = max(96, self.width * self.height // 3)
+        overlap_area = 0
+        for _img, rect in world.obstacle_list:
+            if not self.rect.colliderect(rect):
+                continue
+            inter = self.rect.clip(rect)
+            overlap_area += inter.width * inter.height
+        return overlap_area >= min_area
+
+    def _teleport_player_to_nearest_surface_above(self, world, area_group=None) -> bool:
+        """卡進地圖磚時：傳送到水平範圍內正上方最近的立足面。"""
+        if self.char_type != CharacterTypes.Player:
+            return False
+        margin = max(4, self.rect.width // 4)
+        foot_xs = (
+            self.rect.left + margin,
+            self.rect.centerx,
+            self.rect.right - margin,
+        )
+        best_top = None
+        for _img, rect in world.obstacle_list:
+            if not self.rect.colliderect(rect):
+                continue
+            if best_top is None or rect.top < best_top:
+                best_top = rect.top
+        if best_top is None:
+            feet = self.rect.bottom
+            for foot_x in foot_xs:
+                for _img, rect in world.obstacle_list:
+                    if rect.right <= foot_x or rect.left >= foot_x:
+                        continue
+                    if rect.top < feet:
+                        continue
+                    if best_top is None or rect.top < best_top:
+                        best_top = rect.top
+        if area_group is not None:
+            for foot_x in foot_xs:
+                for area in list(area_group):
+                    if not area.intersects_rect(self.rect) and area.rect.bottom < self.rect.top:
+                        continue
+                    sty = area.surface_top_at_world_x(int(foot_x))
+                    if sty is None:
+                        continue
+                    if best_top is None or sty < best_top:
+                        best_top = int(sty)
+        if best_top is None:
+            return False
+        self.rect.bottom = int(best_top)
+        self.vel_y = 0.0
+        self.is_in_air = False
+        for _ in range(TILE_SIZE * 2):
+            if not self._player_deeply_stuck_in_world(world):
+                break
+            self.rect.y -= 1
+        self._depenetrate_world_obstacles_only(world)
+        return True
+
+    def _resolve_player_stuck_in_world(self, world, area_group=None) -> None:
+        if self.char_type != CharacterTypes.Player or not self.is_alive:
+            return
+        if not self._player_deeply_stuck_in_world(world):
+            return
+        self._teleport_player_to_nearest_surface_above(world, area_group)
 
     def _depenetrate_world_obstacles_only(self, world):
         """僅對地圖磚：若仍與磚重疊，沿穿透最淺軸推出（例：頭頂先撞面積再與磚重疊）。"""
@@ -197,21 +322,27 @@ class Soldier(pygame.sprite.Sprite):
     def _support_top_at_foot_x(self, foot_x, bottom_y, world, area_group, snap_up, snap_down, enemy_group=None):
         """自腳下 x 對齊：找可站立面之最高 top（單柱射線）。"""
         best = None
-        for _, rect in world.obstacle_list:
-            if rect.left <= foot_x <= rect.right:
-                gap = bottom_y - rect.top
-                if -snap_up <= gap <= snap_down:
-                    if best is None or rect.top > best:
-                        best = rect.top
+        probe = pygame.Rect(int(foot_x) - 12, int(bottom_y) - snap_up, 24, snap_up + snap_down + 8)
+        for _, rect in iter_obstacles_in_probe(world.obstacle_list, probe, foot_x=foot_x):
+            gap = bottom_y - rect.top
+            if -snap_up <= gap <= snap_down:
+                if best is None or rect.top > best:
+                    best = rect.top
         if (
             self.char_type == CharacterTypes.Player
             and enemy_group is not None
             and self.vel_y >= 0
         ):
+            from .enemy_special import enemy_body_rect, player_can_stand_on_enemy
+
             for e in enemy_group:
                 if not getattr(e, "is_alive", True):
                     continue
-                er = e.rect
+                if not player_can_stand_on_enemy(e):
+                    continue
+                er = enemy_body_rect(e)
+                if er.right < foot_x - 12 or er.left > foot_x + 12:
+                    continue
                 if er.left <= foot_x <= er.right:
                     gap = bottom_y - er.top
                     if -snap_up <= gap <= snap_down and self.rect.bottom <= er.top + 10:
@@ -241,13 +372,14 @@ class Soldier(pygame.sprite.Sprite):
         target = self._support_top_at_foot_x(cx, bottom, world, area_group, su, sd, enemy_group)
         if target is None:
             margin = max(1, min(6, self.width // 5))
-            sides = []
-            for fx in (self.rect.left + margin, self.rect.right - margin):
-                t = self._support_top_at_foot_x(fx, bottom, world, area_group, su, sd, enemy_group)
-                if t is not None:
-                    sides.append(t)
-            if sides:
-                target = max(sides)
+            left_t = self._support_top_at_foot_x(
+                self.rect.left + margin, bottom, world, area_group, su, sd, enemy_group,
+            )
+            right_t = self._support_top_at_foot_x(
+                self.rect.right - margin, bottom, world, area_group, su, sd, enemy_group,
+            )
+            if left_t is not None and right_t is not None and abs(left_t - right_t) <= sd + 1:
+                target = max(left_t, right_t)
         if target is None:
             return False
         delta = target - self.rect.bottom
@@ -315,14 +447,29 @@ class Soldier(pygame.sprite.Sprite):
                     if push > best:
                         best = push
                         hit_ceiling = True
+            if self.char_type == CharacterTypes.Player and enemy_group is not None:
+                for e in enemy_group:
+                    if not _enemy_blocks_player_fully(e):
+                        continue
+                    body = _enemy_body_for_player_collision(e)
+                    if body.colliderect(test):
+                        push = body.bottom - self.rect.top
+                        if push > best:
+                            best = push
+                            hit_ceiling = True
             return best, hit_ceiling
 
         best = dy
+        min_foot_overlap = max(6, self.width // 4)
         for _img, rect in world.obstacle_list:
-            if rect.colliderect(test):
-                sep = rect.top - self.rect.bottom
-                if sep < best:
-                    best = sep
+            if not rect.colliderect(test):
+                continue
+            foot_overlap = min(self.rect.right, rect.right) - max(self.rect.left, rect.left)
+            if foot_overlap < min_foot_overlap:
+                continue
+            sep = rect.top - self.rect.bottom
+            if sep < best:
+                best = sep
         if area_group is not None:
             for area in list(area_group):
                 if area.intersects_rect(test):
@@ -339,17 +486,23 @@ class Soldier(pygame.sprite.Sprite):
                         best = sep
         if self.char_type == CharacterTypes.Player and enemy_group is not None and dy > 0:
             for e in enemy_group:
-                if not e.is_alive:
+                body = _enemy_body_for_player_collision(e)
+                if not body.colliderect(test):
                     continue
-                if not e.rect.colliderect(test):
+                if _enemy_blocks_player_fully(e):
+                    sep = body.top - self.rect.bottom
+                    if sep < best:
+                        best = sep
+                    continue
+                if not _enemy_allows_player_stand(e):
                     continue
                 if not player_standing_on_enemy_head(self, e):
-                    overlap_w = min(self.rect.right, e.rect.right) - max(self.rect.left, e.rect.left)
+                    overlap_w = min(self.rect.right, body.right) - max(self.rect.left, body.left)
                     if overlap_w < max(6, int(self.rect.width * 0.22)):
                         continue
-                    if self.rect.bottom > e.rect.top + 14:
+                    if self.rect.bottom > body.top + 14:
                         continue
-                sep = e.rect.top - self.rect.bottom
+                sep = body.top - self.rect.bottom
                 if sep < best:
                     best = sep
         if self.char_type == CharacterTypes.Enemy and player_ref is not None and player_ref.is_alive:
@@ -357,9 +510,72 @@ class Soldier(pygame.sprite.Sprite):
                 sep = player_ref.rect.top - self.rect.bottom
                 if sep < best:
                     best = sep
-        if best < 0:
+        if best < 0 and not (
+            self.char_type == CharacterTypes.Player
+            and dy > 0
+            and enemy_group is not None
+            and any(
+                _enemy_blocks_player_fully(e)
+                and _enemy_body_for_player_collision(e).colliderect(test)
+                for e in enemy_group
+            )
+        ):
             best = 0
         return best, hit_ceiling
+
+    def _resolve_player_giant_collision(self, enemy_group) -> None:
+        """巨像全實心：上下左右穿透時沿最淺軸推出（含頭頂）。"""
+        if self.char_type != CharacterTypes.Player or enemy_group is None:
+            return
+        for _ in range(6):
+            moved = False
+            for e in enemy_group:
+                if not _enemy_blocks_player_fully(e):
+                    continue
+                body = _enemy_body_for_player_collision(e)
+                if not self.rect.colliderect(body):
+                    continue
+                from .enemy_special import (
+                    giant_colossus_is_crush_hazard,
+                    player_on_giant_head,
+                )
+
+                if giant_colossus_is_crush_hazard(e) and not player_on_giant_head(self, e):
+                    continue
+                if player_on_giant_head(self, e):
+                    overlap_x = min(self.rect.right, body.right) - max(self.rect.left, body.left)
+                    if overlap_x > 0:
+                        if self.rect.centerx < body.centerx:
+                            self.rect.right = body.left
+                        else:
+                            self.rect.left = body.right
+                    if self.rect.bottom > body.top:
+                        self.rect.bottom = body.top
+                        if self.vel_y > 0:
+                            self.vel_y = 0
+                    moved = True
+                    break
+                overlap_x = min(self.rect.right, body.right) - max(self.rect.left, body.left)
+                overlap_y = min(self.rect.bottom, body.bottom) - max(self.rect.top, body.top)
+                if overlap_x <= 0 or overlap_y <= 0:
+                    continue
+                if overlap_x < overlap_y:
+                    if self.rect.centerx < body.centerx:
+                        self.rect.right = body.left
+                    else:
+                        self.rect.left = body.right
+                elif self.rect.centery < body.centery:
+                    self.rect.bottom = body.top
+                    if self.vel_y > 0:
+                        self.vel_y = 0
+                else:
+                    self.rect.top = body.bottom
+                    if self.vel_y < 0:
+                        self.vel_y = 0
+                moved = True
+                break
+            if not moved:
+                return
 
     def _feet_rect_for_spike(self, body: pygame.Rect | None = None) -> pygame.Rect:
         """腳底帶（與地刺傷害／避刺判定一致）。"""
@@ -466,7 +682,12 @@ class Soldier(pygame.sprite.Sprite):
 
         if self.char_type == CharacterTypes.Player and enemy_group is not None and dx != 0:
             x_body = pygame.Rect(self.rect.x + dx, self.rect.y, self.width, self.height - 1)
-            if any(e.is_alive and e.rect.colliderect(x_body) for e in enemy_group):
+            if any(
+                e.is_alive
+                and _enemy_blocks_player_fully(e)
+                and _enemy_body_for_player_collision(e).colliderect(x_body)
+                for e in enemy_group
+            ):
                 ndx, nlift = self._try_slope_nudge_horizontal(dx, world, area_group, enemy_group, player_ref)
                 if ndx != 0:
                     dx = ndx
@@ -475,9 +696,9 @@ class Soldier(pygame.sprite.Sprite):
                     dx = 0
                     horizontal_blocked = True
 
-        if self.char_type == CharacterTypes.Enemy and player_ref is not None and player_ref.is_alive and dx != 0:
+        if self.char_type == CharacterTypes.Enemy and player_ref is not None and dx != 0:
             x_body = pygame.Rect(self.rect.x + dx, self.rect.y, self.width, self.height - 1)
-            if player_ref.rect.colliderect(x_body):
+            if self._player_blocks_enemy_rect(player_ref, x_body):
                 ndx, nlift = self._try_slope_nudge_horizontal(dx, world, area_group, enemy_group, player_ref)
                 if ndx != 0:
                     dx = ndx
@@ -537,7 +758,7 @@ class Soldier(pygame.sprite.Sprite):
             on_ground = any(area.intersects_rect(feet) for area in list(area_group))
         if not on_ground and self.char_type == CharacterTypes.Player and enemy_group is not None:
             on_ground = any(
-                e.is_alive and player_standing_on_enemy_head(self, e)
+                _enemy_allows_player_stand(e) and player_standing_on_enemy_head(self, e)
                 for e in enemy_group
             )
 
@@ -572,14 +793,23 @@ class Soldier(pygame.sprite.Sprite):
 
         if not getattr(self, "ghost_walls", False):
             self._depenetrate_world_obstacles_only(world)
+        if self.char_type == CharacterTypes.Player and enemy_group is not None:
+            self._resolve_player_giant_collision(enemy_group)
+        if self.char_type == CharacterTypes.Player and self.is_alive:
+            self._resolve_player_stuck_in_world(world, area_group)
 
         if self.char_type == CharacterTypes.Enemy:
+            from .enemy_archetypes import is_tiny_fraction_enemy
             from .enemy_special import enemy_ignores_spikes_and_ledges
 
-            if not enemy_ignores_spikes_and_ledges(self):
+            if not enemy_ignores_spikes_and_ledges(self) and not is_tiny_fraction_enemy(self):
                 self._try_step_off_spikes(world)
 
-        if not flying and self.rect.y > SCREEN_HEIGHT:
+        if self.char_type == CharacterTypes.Enemy and not flying:
+            pit_y = int(getattr(world, "level_rows", 0)) * TILE_SIZE + TILE_SIZE * 3
+            if pit_y > 0 and self.rect.top > pit_y:
+                self.health = 0.0
+        elif self.char_type == CharacterTypes.Player and not flying and self.rect.y > SCREEN_HEIGHT:
             self.health = 0.0
 
         screen_scroll = 0
@@ -623,6 +853,11 @@ class Soldier(pygame.sprite.Sprite):
     def take_damage(self, dmg):
         if not self.is_alive:
             return
+        if self.char_type == CharacterTypes.Player and (
+            getattr(self, "giant_crush_flatten", False)
+            or getattr(self, "crush_anim_start_ms", 0)
+        ):
+            return
         if self.char_type == CharacterTypes.Enemy and getattr(self, "invincible", False):
             return
         self.health = round_hp(max(0.0, float(self.health) - float(dmg)), HP_DECIMAL_PLACES)
@@ -634,8 +869,19 @@ class Soldier(pygame.sprite.Sprite):
             game_audio.play_player_hurt(at_rect=self.rect)
         elif self.char_type == CharacterTypes.Enemy:
             from . import game_audio
+            from .enemy_special import is_calc_tank_enemy, is_giant_colossus_enemy
 
             game_audio.play_enemy_hurt(at_rect=self.rect, enemy=self)
+            if is_calc_tank_enemy(self):
+                self._head_label_cache = None
+                if int(getattr(self, "_calc_tank_x_exp", 0)) == 0:
+                    self.head_label = str(int(round(float(self.health))))
+            elif is_giant_colossus_enemy(self):
+                from .enemy_special import notify_giant_player_aggro
+
+                self._head_label_cache = None
+                self.head_label = str(int(round(float(self.health))))
+                notify_giant_player_aggro(self)
 
     def heal(self, hp):
         self.health = round_hp(
@@ -754,9 +1000,9 @@ class Soldier(pygame.sprite.Sprite):
         img = self.image
         if self.is_x_flip:
             img = pygame.transform.flip(img, True, False)
-        scale = float(getattr(self, "scale_mult", 1.0)) * float(getattr(self, "_height_scale", 1.0))
+        scale = float(getattr(self, "_height_scale", 1.0))
         if abs(scale - 1.0) > 0.02:
-            w = max(1, int(img.get_width() * scale))
+            w = max(1, int(img.get_width()))
             h = max(1, int(img.get_height() * scale))
             img = pygame.transform.smoothscale(img, (w, h))
         alpha = int(getattr(self, "alpha", 255))
@@ -782,6 +1028,13 @@ class Player(Soldier):
         self.integral_only_lock = False
         self.center_notice_until_ms = 0
         self.center_notice_text = ""
+        self.giant_crush_flatten = False
+        self.giant_crush_kill_at_ms = 0
+        self.crush_anim_center = (0, 0)
+        self.crush_anim_feet = 0
+        self.crush_anim_start_ms = 0
+        self.crush_frozen_scroll = 0
+        self._crush_landed = False
         # 0 次彩蛋「啵」：由主迴圈依此計數播放（測試可 assert）
         self.pop_sound_requests = 0
         self.cast_anim_active = False
@@ -882,6 +1135,7 @@ class Enemy(Soldier):
         self._last_spike_damage_ms = 0
         self.head_label = None
         self.math_label = None
+        self.label_suffix = None
         self.speed_mult = 1.0
         self.shoot_cd_mult = 1.0
         self.scale_mult = 1.0
@@ -912,12 +1166,18 @@ class Enemy(Soldier):
         self._sin_phase_v = 0.0
         self._sin_last_off = 0.0
         self._ai_activated = False
+        self._tiny_dodge_until_ms = 0
+        self._tiny_dodge_cd_until_ms = 0
+        self._tiny_dodge_dx = 0
+        self._tiny_dodge_dy = 0
         self._calc_tank_priority = False
         self._calc_tank_base_speed_mult = 0.7
         self._imaginary_drain_ms = 0
         self._dodge_until_ms = 0
         self._nearby_derivative_blocks = ()
         self._nearby_integral_blocks = ()
+        self._nearby_square_blocks = ()
+        self._giant_square_chase = False
         self._peer_jump_cooldown_until_ms = 0
         self._peer_retreat_cooldown_until_ms = 0
         self._peer_rng = random.Random((id(self) ^ int(pygame.time.get_ticks())) & 0x7FFFFFFF)
@@ -935,6 +1195,23 @@ class Enemy(Soldier):
     def _effective_speed(self) -> int:
         return max(1, int(round(self.speed * getattr(self, "speed_mult", 1.0))))
 
+    def _melee_bump_step_px(self) -> int:
+        base = max(5, int(round(self._effective_speed() * 2.5)))
+        from .enemy_special import is_giant_colossus_enemy
+
+        if is_giant_colossus_enemy(self):
+            sc_f = max(1.0, float(getattr(self, "_giant_scale_factor", 1.0)))
+            return max(base, int(round(base * sc_f)))
+        return base
+
+    def _melee_bump_duration_ticks(self) -> int:
+        from .enemy_special import is_giant_colossus_enemy
+
+        if is_giant_colossus_enemy(self):
+            sc_f = max(1.0, float(getattr(self, "_giant_scale_factor", 1.0)))
+            return max(18, int(round(18 * sc_f)))
+        return 18
+
     def _apply_kenney_walk_pair_if_any(self) -> None:
         pair = ENEMY_KENNEY_WALK_PAIR_GIDS.get(self.enemy_gid)
         if pair is None:
@@ -942,6 +1219,10 @@ class Enemy(Soldier):
         gid_a, gid_b = pair
         scale = float(getattr(self, "scale_mult", 1.0))
         px = max(8, int(34 * ENEMY_VISUAL_SCALE * scale))
+        if self.enemy_gid == 65820:
+            from .enemy_archetypes import TINY_FRACTION_MIN_PX
+
+            px = max(TINY_FRACTION_MIN_PX, px)
         rgb_a = ENEMY_KENNEY_TILE_RGB.get(gid_a, (220, 90, 90))
         rgb_b = ENEMY_KENNEY_TILE_RGB.get(gid_b, (220, 90, 90))
         img_a = surface_for_gid(gid_a, px, fallback_rgb=rgb_a)
@@ -1008,9 +1289,7 @@ class Enemy(Soldier):
         best: int | None = None
         y_lo = feet - up
         y_hi = feet + down
-        for _img, rect in world.obstacle_list:
-            if not rect.colliderect(probe):
-                continue
+        for _img, rect in iter_obstacles_in_probe(world.obstacle_list, probe, foot_x=foot_x):
             if rect.top < y_lo or rect.top > y_hi:
                 continue
             if best is None or rect.top < best:
@@ -1073,9 +1352,17 @@ class Enemy(Soldier):
         cur = self._foot_ground_top_y(cx, world, area_group)
         if cur is None:
             return False
+        from .enemy_archetypes import is_tiny_fraction_enemy
+
         margin = max(self._effective_speed(), 4)
         lead_x = int(cx + forward * (self.width // 2 + margin))
         ahead = self._foot_ground_top_y(lead_x, world, area_group)
+        if is_tiny_fraction_enemy(self):
+            if ahead is None:
+                return True
+            if ahead - cur > 8:
+                return True
+            return False
         deep = self._ground_below_ahead(lead_x, world, area_group, TILE_SIZE * 2 + 8)
         if ahead is None:
             if deep is not None and deep >= cur + TILE_SIZE // 2:
@@ -1126,10 +1413,17 @@ class Enemy(Soldier):
             if self._collides_with_world_or_area(test, world, area_group):
                 break
             if self.char_type == CharacterTypes.Player and enemy_group is not None:
-                if any(e.is_alive and e.rect.colliderect(test) for e in enemy_group):
+                blocked = False
+                for e in enemy_group:
+                    if not _enemy_blocks_player_fully(e):
+                        continue
+                    if _enemy_body_for_player_collision(e).colliderect(test):
+                        blocked = True
+                        break
+                if blocked:
                     break
-            if self.char_type == CharacterTypes.Enemy and player_ref is not None and player_ref.is_alive:
-                if player_ref.rect.colliderect(test):
+            if self.char_type == CharacterTypes.Enemy and player_ref is not None:
+                if self._player_blocks_enemy_rect(player_ref, test):
                     break
             if (
                 self.char_type == CharacterTypes.Enemy
@@ -1170,10 +1464,15 @@ class Enemy(Soldier):
         return False
 
     def _overlaps_any_enemy(self, enemy_group) -> bool:
+        x_lo = self.rect.left - self.rect.width
+        x_hi = self.rect.right + self.rect.width
         for other in enemy_group:
             if other is self or not getattr(other, "is_alive", True):
                 continue
-            if self.rect.colliderect(other.rect):
+            er = other.rect
+            if er.right < x_lo or er.left > x_hi:
+                continue
+            if self.rect.colliderect(er):
                 return True
         return False
 
@@ -1232,7 +1531,7 @@ class Enemy(Soldier):
             self._peer_retreat_cooldown_until_ms = now_ms + ENEMY_PEER_RETREAT_COOLDOWN_MS
             self._apply_ground_ray_alignment(world, area_group, enemy_group)
 
-    def feet_on_spike_damage(self, world) -> bool:
+    def feet_on_spike_damage(self, world, spike_rects=None) -> bool:
         """腳底是否踩在伸出中的尖刺上（與避刺邏輯一致，不用整體碰撞箱）。"""
         if self.char_type == CharacterTypes.Enemy:
             from .enemy_special import enemy_ignores_spikes_and_ledges
@@ -1242,9 +1541,10 @@ class Enemy(Soldier):
         if not world.spikes_extended:
             return False
         feet = self._feet_rect_for_spike()
-        return any(feet.colliderect(sr) for sr in world.spike_damage_rects())
+        rects = spike_rects if spike_rects is not None else world.spike_damage_rects()
+        return any(feet.colliderect(sr) for sr in rects)
 
-    def _would_overlap_spike_damage_feet(self, world, step_dx: int) -> bool:
+    def _would_overlap_spike_damage_feet(self, world, step_dx: int, spike_rects=None) -> bool:
         """下一步水平位移後，腳底是否踩進伸出中的尖刺區。"""
         if self.char_type == CharacterTypes.Enemy:
             from .enemy_special import enemy_ignores_spikes_and_ledges
@@ -1256,7 +1556,8 @@ class Enemy(Soldier):
         cand = self.rect.copy()
         cand.x += int(round(step_dx))
         feet = self._feet_rect_for_spike(cand)
-        return any(feet.colliderect(sr) for sr in world.spike_damage_rects())
+        rects = spike_rects if spike_rects is not None else world.spike_damage_rects()
+        return any(feet.colliderect(sr) for sr in rects)
 
     def _try_step_off_spikes(self, world) -> None:
         """已踩在刺上時嘗試水平離開，避免停著仍持續扣血。"""
@@ -1305,17 +1606,19 @@ class Enemy(Soldier):
             self.update_action(ActionTypes.IDLE)
             return
 
+        from .enemy_archetypes import is_tiny_fraction_enemy
         from .enemy_special import enemy_ignores_spikes_and_ledges, is_calc_tank_enemy
 
         ai_left = self.direction == -1
         ai_right = self.direction == 1
         ignore_hazards = enemy_ignores_spikes_and_ledges(self)
+        skip_spike_dodge = is_tiny_fraction_enemy(self)
         no_jump = is_calc_tank_enemy(self)
-        if not ignore_hazards and self.feet_on_spike_damage(world):
+        if not ignore_hazards and not skip_spike_dodge and self.feet_on_spike_damage(world):
             self.direction *= -1
             ai_left = self.direction == -1
             ai_right = self.direction == 1
-        if not ignore_hazards:
+        if not ignore_hazards and not skip_spike_dodge:
             ai_left, ai_right = self._filter_horizontal_move_for_spikes(world, ai_left, ai_right)
         ledge_brake = False
         if not ignore_hazards and not no_jump and not self.is_in_air and (ai_left or ai_right):
@@ -1353,16 +1656,19 @@ class Enemy(Soldier):
         enemy_group=None,
         *,
         skip_ledge_brake: bool = False,
+        ignore_player_block: bool = False,
     ) -> tuple[bool, bool]:
+        from .enemy_archetypes import is_tiny_fraction_enemy
         from .enemy_special import enemy_ignores_spikes_and_ledges, is_calc_tank_enemy
 
         ignore_hazards = enemy_ignores_spikes_and_ledges(self)
+        skip_spike_dodge = is_tiny_fraction_enemy(self)
         no_jump = is_calc_tank_enemy(self)
-        if not ignore_hazards and self.feet_on_spike_damage(world):
+        if not ignore_hazards and not skip_spike_dodge and self.feet_on_spike_damage(world):
             self.direction *= -1
             ai_left = self.direction == -1
             ai_right = self.direction == 1
-        if not ignore_hazards:
+        if not ignore_hazards and not skip_spike_dodge:
             ai_left, ai_right = self._filter_horizontal_move_for_spikes(world, ai_left, ai_right)
         ledge_brake = False
         if (
@@ -1378,7 +1684,11 @@ class Enemy(Soldier):
                 self.direction *= -1
                 ai_left = ai_right = False
                 ledge_brake = True
-        self.move(ai_left, ai_right, world, area_group, enemy_group=enemy_group, player_ref=player)
+        self.move(
+            ai_left, ai_right, world, area_group,
+            enemy_group=enemy_group,
+            player_ref=None if ignore_player_block else player,
+        )
         return ai_left, ai_right, ledge_brake
 
     def _ai_chase_aggressive(self, player, world, area_group=None, enemy_bullet_group=None, enemy_group=None):
@@ -1426,8 +1736,15 @@ class Enemy(Soldier):
     def _melee_body_overlaps_player(self, player) -> bool:
         if not player.is_alive:
             return False
-        if player_standing_on_enemy_head(player, self):
+        from .enemy_special import player_on_giant_head
+
+        if (
+            player_standing_on_enemy_head(player, self)
+            or player_on_giant_head(player, self)
+        ):
             return False
+        if self.rect.colliderect(player.rect):
+            return True
         clip = self.rect.clip(player.rect)
         if clip.width >= max(6, int(min(self.width, player.width) * 0.22)):
             if clip.height >= max(6, int(min(self.height, player.height) * 0.18)):
@@ -1435,14 +1752,22 @@ class Enemy(Soldier):
         return self._melee_in_attack_range(player)
 
     def _melee_in_attack_range(self, player) -> bool:
-        """貼身／近距離攻擊範圍（含衝刺後未完全重疊）。"""
-        if not player.is_alive or player_standing_on_enemy_head(player, self):
+        """貼身／近距離攻擊範圍（邊緣距離，重疊時必中）。"""
+        from .enemy_special import player_on_giant_head
+
+        if (
+            not player.is_alive
+            or player_standing_on_enemy_head(player, self)
+            or player_on_giant_head(player, self)
+        ):
             return False
-        dx = abs(player.rect.centerx - self.rect.centerx)
-        dy = abs(player.rect.centery - self.rect.centery)
-        reach_x = max(14, int(max(self.width, player.width) * 0.72))
-        reach_y = max(18, int(max(self.height, player.height) * 0.85))
-        return dx < reach_x and dy < reach_y
+        if self.rect.colliderect(player.rect):
+            return True
+        gap_x = max(0, max(self.rect.left, player.rect.left) - min(self.rect.right, player.rect.right))
+        gap_y = max(0, max(self.rect.top, player.rect.top) - min(self.rect.bottom, player.rect.bottom))
+        reach_x = max(12, int(max(self.width, player.width) * 0.55))
+        reach_y = max(14, int(max(self.height, player.height) * 0.65))
+        return gap_x <= reach_x and gap_y <= reach_y
 
     def _try_melee_contact_damage(self, player, now_ms: int) -> bool:
         """貼身重疊時補傷（避免太近時衝撞判定打不到）。"""
@@ -1467,7 +1792,10 @@ class Enemy(Soldier):
             calc_tank_derivative_in_attack_range,
             calc_tank_flee_spikes,
             calc_tank_priority_active,
+            giant_colossus_is_crush_hazard,
             is_calc_tank_enemy,
+            is_giant_colossus_enemy,
+            try_apply_giant_crush,
         )
 
         dx = player.rect.centerx - self.rect.centerx
@@ -1482,18 +1810,18 @@ class Enemy(Soldier):
         if ai_calc_tank_priority_move(self, player, world, area_group, enemy_group):
             return
 
-        if use_bump and self._melee_in_attack_range(player):
+        giant_crush_mode = (
+            is_giant_colossus_enemy(self) and giant_colossus_is_crush_hazard(self)
+        )
+        if use_bump and self._melee_in_attack_range(player) and not giant_crush_mode:
             self._try_melee_contact_damage(player, now)
 
         if use_bump and self._bump_ticks_remaining > 0:
             self._bump_ticks_remaining -= 1
-            spd = max(5, int(round(self._effective_speed() * 2.5)))
-            step = spd * self.direction
+            step = self._melee_bump_step_px() * self.direction
             if not self._would_overlap_spike_damage_feet(world, step):
                 if not getattr(self, "ghost_walls", False):
-                    step = self._clamp_horizontal_move(
-                        step, world, area_group, player_ref=player,
-                    )
+                    step = self._clamp_horizontal_move(step, world, area_group)
                 if step:
                     self.rect.x += step
                     self._apply_ground_ray_alignment(world, area_group, enemy_group)
@@ -1505,7 +1833,21 @@ class Enemy(Soldier):
                         self._resolve_enemy_peer_overlap(
                             self.direction, enemy_group, world, area_group,
                         )
-                if player.is_alive and not self._bump_damage_done:
+                if (
+                    is_giant_colossus_enemy(self)
+                    and giant_colossus_is_crush_hazard(self)
+                    and player.is_alive
+                ):
+                    try_apply_giant_crush(
+                        self,
+                        player,
+                        now,
+                        frozen_scroll=int(getattr(player, "_live_background_scroll", 0)),
+                        world=world,
+                        area_group=area_group,
+                        enemy_group=enemy_group,
+                    )
+                elif player.is_alive and not self._bump_damage_done:
                     if self._melee_in_attack_range(player):
                         player.take_damage(ENEMY_BULLET_DAMAGE)
                         self._bump_damage_done = True
@@ -1527,6 +1869,8 @@ class Enemy(Soldier):
             self.update_action(ActionTypes.IDLE)
         elif ai_left or ai_right:
             self.update_action(ActionTypes.RUN)
+        elif use_bump and self._melee_in_attack_range(player):
+            self.update_action(ActionTypes.RUN)
         else:
             self.update_action(ActionTypes.IDLE)
 
@@ -1537,23 +1881,33 @@ class Enemy(Soldier):
         bump_blocked = (
             is_calc_tank_enemy(self) and calc_tank_derivative_in_attack_range(self)
         )
+        in_bump_range = abs(dx) < TILE_SIZE * 3 or self.rect.colliderect(player.rect)
         if (
             not bump_blocked
             and self._bump_ticks_remaining <= 0
             and now >= self._bump_next_ready_ms
             and not self.is_in_air
             and dy_vertical < int(TILE_SIZE * 1.2)
-            and abs(dx) < TILE_SIZE * 3
+            and in_bump_range
             and player.is_alive
         ):
-            self._bump_ticks_remaining = 18
+            self._bump_ticks_remaining = self._melee_bump_duration_ticks()
             self._bump_damage_done = False
             self._bump_next_ready_ms = now + 1200
             self.direction = 1 if dx >= 0 else -1
             self.facing = self.direction
             game_audio.play_monster_attack_if_visible(self.rect, self)
 
-    def ai(self, player, world, enemy_bullet_group, area_group=None, enemy_group=None):
+    def ai(
+        self,
+        player,
+        world,
+        enemy_bullet_group,
+        area_group=None,
+        enemy_group=None,
+        projectile_group=None,
+        numeric_group=None,
+    ):
         from . import enemy_special
         from .enemy_special import effective_shoot_cooldown
 
@@ -1592,7 +1946,22 @@ class Enemy(Soldier):
         if ai_kind == "imaginary":
             enemy_special.ai_imaginary(self, player, world, area_group, enemy_group)
             return
-        if ai_kind in ("chase", "chase_melee", "tiny_fraction", "neg_one", "giant_256"):
+        if ai_kind == "giant_256":
+            enemy_special.ai_giant_colossus(self, player, world, area_group, enemy_group)
+            return
+        if ai_kind in ("chase", "chase_melee", "tiny_fraction", "neg_one"):
+            if ai_kind == "tiny_fraction":
+                if enemy_special.tiny_fraction_bullet_dodge_step(
+                    self,
+                    projectile_group,
+                    numeric_group,
+                    world,
+                    area_group,
+                    enemy_group,
+                    player,
+                    now_ms,
+                ):
+                    return
             if getattr(self, "uses_melee_bump", False) or ai_kind == "chase_melee":
                 self._ai_chase_contact_melee(player, world, area_group, enemy_group)
             else:
@@ -1658,17 +2027,19 @@ class Enemy(Soldier):
             self.update_action(ActionTypes.IDLE)
             return
 
+        from .enemy_archetypes import is_tiny_fraction_enemy
         from .enemy_special import enemy_ignores_spikes_and_ledges, is_calc_tank_enemy
 
         ai_left = self.direction == -1
         ai_right = self.direction == 1
         ignore_hazards = enemy_ignores_spikes_and_ledges(self)
+        skip_spike_dodge = is_tiny_fraction_enemy(self)
         no_jump = is_calc_tank_enemy(self)
-        if not ignore_hazards and self.feet_on_spike_damage(world):
+        if not ignore_hazards and not skip_spike_dodge and self.feet_on_spike_damage(world):
             self.direction *= -1
             ai_left = self.direction == -1
             ai_right = self.direction == 1
-        if not ignore_hazards:
+        if not ignore_hazards and not skip_spike_dodge:
             ai_left, ai_right = self._filter_horizontal_move_for_spikes(world, ai_left, ai_right)
         ledge_brake = False
         if not ignore_hazards and not no_jump and not self.is_in_air and (ai_left or ai_right):

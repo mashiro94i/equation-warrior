@@ -1,4 +1,4 @@
-"""Kenney / 地圖編輯器 CSV 格編號語意（與 map_editor 共用）。"""
+"""Kenney / CSV 格編號語意（與 map_editor 編輯器共用同一套 GID 規則）。"""
 from __future__ import annotations
 
 # 出生／重生點
@@ -22,6 +22,8 @@ GID_AREA_TILE = 65796
 # CSV 微積分符號塊（載入後轉成 CalculusBlock sprite）
 GID_MAP_CALC_INTEGRAL_BLOCK = 65855
 GID_MAP_CALC_DERIVATIVE_BLOCK = 65856
+GID_MAP_CALC_SQUARE_BLOCK = 65882
+GID_MAP_CALC_SQRT_BLOCK = 65883
 
 # 可破壞牆（面積滑行撞擊後消失；131368 為常見誤植別名）
 GID_DESTRUCTIBLE_WALLS = frozenset({13168, 131368})
@@ -53,6 +55,8 @@ ALL_SEMANTIC_GIDS = (
         GID_KEY_DOOR,
         GID_MAP_CALC_INTEGRAL_BLOCK,
         GID_MAP_CALC_DERIVATIVE_BLOCK,
+        GID_MAP_CALC_SQUARE_BLOCK,
+        GID_MAP_CALC_SQRT_BLOCK,
     }
     | GID_ENEMIES
     | GID_ENEMY_WALK_ALT
@@ -89,6 +93,10 @@ def classify_tile(tile_id: int) -> str:
         return "map_calc_integral"
     if tile_id == GID_MAP_CALC_DERIVATIVE_BLOCK:
         return "map_calc_derivative"
+    if tile_id == GID_MAP_CALC_SQUARE_BLOCK:
+        return "map_calc_square"
+    if tile_id == GID_MAP_CALC_SQRT_BLOCK:
+        return "map_calc_sqrt"
     if tile_id in GID_DESTRUCTIBLE_WALLS:
         return "destructible_wall"
     if tile_id in GID_LEVEL_EXITS:

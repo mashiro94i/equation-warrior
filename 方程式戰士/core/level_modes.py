@@ -39,7 +39,7 @@ class LevelModeConfig:
             elif mode == PlayerMode.SQRT_BLOCK:
                 lines.append("3：根號模式")
         if self.allow_brush_b:
-            lines.append("B：畫筆｜雙按 B：面積拖曳")
+            lines.append("B:畫筆 雙擊B:拖移")
         if self.toggle_heal_sigmoid_key is not None:
             lines.append("4：切換治療 S")
         return tuple(lines)

@@ -6,7 +6,7 @@ import random
 
 import pygame
 
-from .constants import GRAVITY, SCREEN_HEIGHT, SCREEN_WIDTH, TILE_SIZE
+from .constants import GRAVITY, SCREEN_HEIGHT, SCREEN_WIDTH, TILE_SIZE, WHITE
 from .enemy_archetypes import (
     GID_AREA_SPRAYER,
     GID_EXP_X,
@@ -33,6 +33,13 @@ IMAGINARY_DRAIN_INTERVAL_MS = 1000
 GIANT_HP_FACTOR_MIN = 4.0
 GIANT_SCALE_FACTOR_MIN = 0.32
 GIANT_SQRT_SHRINK_KEEP = 0.62
+GIANT_ALGEBRA_SPEED_MULT = 1.2
+GIANT_SQUARE_CHASE_SPEED_MULT = 1.2
+GIANT_LOW_HP_THRESHOLD = 64.0
+GIANT_LOW_HP_SPEED_MULT = 2.0
+GIANT_LOW_HP_SQUARE_SENSE_PX = TILE_SIZE * 14
+GIANT_PLAYER_AGGRO_RANGE_PX = TILE_SIZE * 3.0
+GIANT_PLAYER_AGGRO_AFTER_HIT_MS = 4000
 SIN_LUNGE_TILES = 4
 SIN_STUN_MS = 5000
 SIN_STANDOFF_MIN_TILES = 2.0
@@ -111,6 +118,18 @@ def is_ai_active(enemy, player=None) -> bool:
     return bool(getattr(enemy, "_ai_activated", False))
 
 
+def tiny_fraction_kill(enemy) -> None:
+    enemy.health = 0.0
+    enemy.check_alive()
+
+
+def enemy_collides_rect(enemy, other: pygame.Rect) -> bool:
+    """子彈／方塊與敵人碰撞：以顯示碰撞箱為準。"""
+    if not getattr(enemy, "is_alive", True):
+        return False
+    return enemy_body_rect(enemy).colliderect(other)
+
+
 def apply_archetype_to_enemy(enemy) -> None:
     from .enemy_archetypes import archetype_for_gid
 
@@ -120,6 +139,7 @@ def apply_archetype_to_enemy(enemy) -> None:
     enemy.max_health = float(arch.max_hp)
     enemy.health = float(arch.max_hp)
     enemy.head_label = arch.head_label
+    enemy.label_suffix = arch.label_suffix
     enemy.speed_mult = float(arch.speed_mult)
     enemy.shoot_cd_mult = float(arch.shoot_cd_mult)
     enemy.scale_mult = float(arch.scale_mult)
@@ -157,6 +177,10 @@ def apply_archetype_to_enemy(enemy) -> None:
         enemy.is_in_air = False
     if is_calc_tank_enemy(enemy):
         enemy._calc_tank_base_speed_mult = float(arch.speed_mult)
+        enemy.invincible = False
+        enemy.only_heal_bullet_hurt = False
+        enemy.max_health = 99999.0
+        enemy.health = min(float(enemy.health), 99999.0)
         configure_calc_tank_algebra_state(enemy)
     if enemy.enemy_gid == GID_GIANT_256:
         enemy._giant_base_max_hp = float(arch.max_hp)
@@ -164,8 +188,10 @@ def apply_archetype_to_enemy(enemy) -> None:
         enemy._giant_base_scale = float(arch.scale_mult)
         enemy._giant_hp_factor = 1.0
         enemy._giant_scale_factor = 1.0
+        enemy._giant_algebra_speed_mult = 1.0
         enemy._giant_grown_until_ms = 0
         enemy._giant_reverting = False
+        enemy._giant_player_aggro_until_ms = 0
 
 
 def _refresh_appearance(enemy) -> None:
@@ -243,6 +269,14 @@ def on_projectile_hit(enemy, proj) -> None:
         enemy.heal(dmg)
     else:
         enemy.take_damage(dmg)
+    if is_calc_tank_enemy(enemy):
+        enemy._head_label_cache = None
+        if int(getattr(enemy, "_calc_tank_x_exp", 0)) == 0:
+            enemy.head_label = str(int(round(float(enemy.health))))
+    elif is_giant_colossus_enemy(enemy):
+        enemy._head_label_cache = None
+        enemy.head_label = str(int(round(float(enemy.health))))
+        notify_giant_player_aggro(enemy)
 
 
 def on_calculus_block_hit(enemy, kind: str) -> bool:
@@ -270,6 +304,692 @@ def on_calculus_block_hit(enemy, kind: str) -> bool:
         _sin_lunge(enemy)
         return True
     return False
+
+
+def is_tiny_fraction_enemy(enemy) -> bool:
+    from .enemy_archetypes import is_tiny_fraction_enemy as _is_tiny
+
+    return _is_tiny(enemy)
+
+
+TINY_FRACTION_DODGE_MS = 100
+TINY_FRACTION_DODGE_SPEED = 16
+TINY_FRACTION_DODGE_COOLDOWN_MS = 140
+_TINY_DODGE_DIRS = (
+    (-1, 0), (1, 0), (0, -1), (0, 1),
+    (-1, -1), (1, -1), (-1, 1), (1, 1),
+)
+
+
+def _projectile_screen_velocity(proj) -> tuple[float, float]:
+    from .enums import PowerType
+    from .projectile import MathProjectile, NumericProjectile
+
+    if isinstance(proj, NumericProjectile):
+        return float(proj.SPEED * proj.dx), float(-proj.SPEED * proj.dy)
+    if isinstance(proj, MathProjectile):
+        if proj.power == PowerType.LINEAR and proj.direction is not None:
+            dx, dy = proj.direction
+            sp = float(MathProjectile.SPEED_PX)
+            return dx * sp, -dy * sp
+        return float(MathProjectile.SPEED_PX * proj.facing), 0.0
+    return 0.0, 0.0
+
+
+def _projectile_threatens_enemy(proj, enemy) -> bool:
+    if not getattr(proj, "alive", lambda: True)():
+        return False
+    body = enemy_body_rect(enemy)
+    sense = body.inflate(96, 72)
+    if not sense.colliderect(proj.rect):
+        return False
+    vx, vy = _projectile_screen_velocity(proj)
+    if abs(vx) < 0.5 and abs(vy) < 0.5:
+        return False
+    to_x = float(body.centerx - proj.rect.centerx)
+    to_y = float(body.centery - proj.rect.centery)
+    return to_x * vx + to_y * vy > 0.0
+
+
+def _tiny_fraction_begin_dodge(enemy, vx: float, vy: float, world, area_group, enemy_group, player, now_ms: int) -> bool:
+    best: tuple[int, int] | None = None
+    best_score = -1e9
+    for dx_dir, dy_dir in _TINY_DODGE_DIRS:
+        step_x = dx_dir * TINY_FRACTION_DODGE_SPEED
+        step_y = dy_dir * TINY_FRACTION_DODGE_SPEED
+        trial = enemy.rect.move(step_x, step_y)
+        if enemy._solid_body_blocks_rect(trial, world, area_group, enemy_group, player):
+            continue
+        away = -(dx_dir * vx + dy_dir * vy)
+        score = away + random.random() * 0.05
+        if score > best_score:
+            best_score = score
+            best = (step_x, step_y)
+    if best is None:
+        return False
+    enemy._tiny_dodge_until_ms = now_ms + TINY_FRACTION_DODGE_MS
+    enemy._tiny_dodge_dx = best[0]
+    enemy._tiny_dodge_dy = best[1]
+    enemy._tiny_dodge_cd_until_ms = now_ms + TINY_FRACTION_DODGE_COOLDOWN_MS
+    return True
+
+
+def tiny_fraction_bullet_dodge_step(
+    enemy,
+    projectile_group,
+    numeric_group,
+    world,
+    area_group,
+    enemy_group,
+    player,
+    now_ms: int,
+) -> bool:
+    """65820：偵測逼近子彈並短距離閃避（不閃平方／根號）。回傳 True 表示本帧已處理移動。"""
+    from .enums import ActionTypes
+
+    if not is_tiny_fraction_enemy(enemy) or not enemy.is_alive:
+        return False
+
+    if now_ms < int(getattr(enemy, "_tiny_dodge_until_ms", 0)):
+        dx = int(getattr(enemy, "_tiny_dodge_dx", 0))
+        dy = int(getattr(enemy, "_tiny_dodge_dy", 0))
+        enemy.rect.x += dx
+        enemy.rect.y += dy
+        if not getattr(enemy, "ghost_walls", False):
+            enemy._depenetrate_world_obstacles_only(world)
+        enemy.update_action(ActionTypes.RUN)
+        return True
+
+    if now_ms < int(getattr(enemy, "_tiny_dodge_cd_until_ms", 0)):
+        return False
+
+    threats: list = []
+    if projectile_group is not None:
+        threats.extend(list(projectile_group))
+    if numeric_group is not None:
+        threats.extend(list(numeric_group))
+
+    for proj in threats:
+        if not _projectile_threatens_enemy(proj, enemy):
+            continue
+        vx, vy = _projectile_screen_velocity(proj)
+        if _tiny_fraction_begin_dodge(enemy, vx, vy, world, area_group, enemy_group, player, now_ms):
+            enemy.rect.x += int(enemy._tiny_dodge_dx)
+            enemy.rect.y += int(enemy._tiny_dodge_dy)
+            if not getattr(enemy, "ghost_walls", False):
+                enemy._depenetrate_world_obstacles_only(world)
+            enemy.update_action(ActionTypes.RUN)
+            return True
+    return False
+
+
+def is_giant_colossus_enemy(enemy) -> bool:
+    return int(getattr(enemy, "enemy_gid", 0)) == GID_GIANT_256
+
+
+def player_on_giant_head(player, enemy) -> bool:
+    """玩家站在臨界巨像頭頂（不應受近戰／碾壓傷害）。"""
+    if not is_giant_colossus_enemy(enemy):
+        return False
+    body = enemy_body_rect(enemy)
+    overlap_w = min(player.rect.right, body.right) - max(player.rect.left, body.left)
+    min_w = max(6, int(player.rect.width * 0.22))
+    if overlap_w < min_w:
+        return False
+    dy = player.rect.bottom - body.top
+    return -12 <= dy <= 18 and player.rect.centery <= body.centery
+
+
+def giant_colossus_is_crush_hazard(enemy) -> bool:
+    """平方變大後（或待壓扁狀態）的巨像會碾玩家。"""
+    if not is_giant_colossus_enemy(enemy) or not getattr(enemy, "is_alive", True):
+        return False
+    if getattr(enemy, "pending_crush_player", False):
+        return True
+    return float(getattr(enemy, "_giant_scale_factor", 1.0)) > 1.01
+
+
+def _giant_normal_speed_mult(enemy) -> float:
+    """體型越大越慢；根號累積 ×1.2、平方累積 ÷1.2。"""
+    base_spd = float(getattr(enemy, "_giant_base_speed_mult", 0.25))
+    sc_f = max(GIANT_SCALE_FACTOR_MIN, float(getattr(enemy, "_giant_scale_factor", 1.0)))
+    alg = float(getattr(enemy, "_giant_algebra_speed_mult", 1.0))
+    return max(0.08, base_spd * (1.0 / sc_f) * alg)
+
+
+def _giant_chase_speed_mult(enemy) -> float:
+    """追平方塊或低血量時的額外速度倍率。"""
+    spd = _giant_normal_speed_mult(enemy)
+    low_hp = float(enemy.health) < GIANT_LOW_HP_THRESHOLD
+    if low_hp:
+        return spd * GIANT_LOW_HP_SPEED_MULT
+    return spd * GIANT_SQUARE_CHASE_SPEED_MULT
+
+
+def notify_giant_player_aggro(enemy, now_ms: int | None = None) -> None:
+    """玩家攻擊巨像後，短時間內改為優先追玩家。"""
+    if not is_giant_colossus_enemy(enemy):
+        return
+    if now_ms is None:
+        now_ms = pygame.time.get_ticks()
+    enemy._giant_player_aggro_until_ms = int(now_ms) + GIANT_PLAYER_AGGRO_AFTER_HIT_MS
+
+
+def _giant_should_prioritize_player(enemy, player, now_ms: int) -> bool:
+    if float(enemy.health) < GIANT_LOW_HP_THRESHOLD:
+        return False
+    if not player.is_alive:
+        return False
+    dist = math.hypot(
+        player.rect.centerx - enemy.rect.centerx,
+        player.rect.centery - enemy.rect.centery,
+    )
+    if dist <= GIANT_PLAYER_AGGRO_RANGE_PX:
+        return True
+    return int(now_ms) < int(getattr(enemy, "_giant_player_aggro_until_ms", 0))
+
+
+def _giant_has_los_to_rect(enemy, target_rect: pygame.Rect, world) -> bool:
+    """巨像與目標之間無地圖實心磚（牆後方不可見）。"""
+    from .perf import iter_obstacles_in_probe
+
+    ex, ey = enemy.rect.centerx, enemy.rect.centery
+    bx, by = target_rect.centerx, target_rect.centery
+    dist = math.hypot(bx - ex, by - ey)
+    if dist < 1.0:
+        return True
+    steps = max(2, min(24, int(dist // 20)))
+    los_box = pygame.Rect(min(ex, bx), min(ey, by), abs(bx - ex) + 1, abs(by - ey) + 1)
+    los_box.inflate_ip(16, 16)
+    nearby_walls = [rect for _img, rect in iter_obstacles_in_probe(world.obstacle_list, los_box)]
+    for i in range(1, steps):
+        t = i / steps
+        x = int(ex + (bx - ex) * t)
+        y = int(ey + (by - ey) * t)
+        probe = pygame.Rect(x - 4, y - 4, 8, 8)
+        if any(probe.colliderect(rect) for rect in nearby_walls):
+            return False
+    return True
+
+
+def _giant_scan_nearest_square_block(
+    enemy,
+    blocks,
+    world,
+    *,
+    max_dist: float | None = None,
+    require_los: bool = True,
+):
+    from .calculus_blocks import CalculusBlock
+
+    best = None
+    best_dist = float("inf")
+    for block in blocks:
+        if not isinstance(block, CalculusBlock):
+            continue
+        if getattr(block, "kind", None) != "square" or not block.alive():
+            continue
+        if require_los and not _giant_has_los_to_rect(enemy, block.rect, world):
+            continue
+        d = math.hypot(
+            block.rect.centerx - enemy.rect.centerx,
+            block.rect.centery - enemy.rect.centery,
+        )
+        if max_dist is not None and d > max_dist:
+            continue
+        if d < best_dist:
+            best_dist = d
+            best = block
+    return best
+
+
+def _giant_square_block_ai(enemy, world, area_group) -> bool:
+    """可視線內的平方塊：平時 ×1.2；HP<64 時 ×2 並只找附近。"""
+    blocks = tuple(getattr(enemy, "_nearby_square_blocks", ()))
+    low_hp = float(enemy.health) < GIANT_LOW_HP_THRESHOLD
+    max_dist = float(GIANT_LOW_HP_SQUARE_SENSE_PX) if low_hp else None
+    if low_hp and max_dist is not None:
+        blocks = tuple(
+            b for b in blocks
+            if math.hypot(
+                b.rect.centerx - enemy.rect.centerx,
+                b.rect.centery - enemy.rect.centery,
+            ) <= max_dist
+        )
+    target = _giant_scan_nearest_square_block(
+        enemy, blocks, world, max_dist=max_dist, require_los=True,
+    )
+    if target is None and low_hp:
+        target = _giant_scan_nearest_square_block(
+            enemy, blocks, world, max_dist=max_dist, require_los=False,
+        )
+    if target is None:
+        if low_hp:
+            enemy._giant_square_chase = True
+            enemy.speed_mult = _giant_chase_speed_mult(enemy)
+            if not getattr(enemy, "_giant_low_hp_patrol_dir", 0):
+                enemy._giant_low_hp_patrol_dir = enemy.direction or 1
+            enemy.direction = int(enemy._giant_low_hp_patrol_dir)
+            enemy.facing = enemy.direction
+            return True
+        enemy._giant_square_chase = False
+        enemy.speed_mult = _giant_normal_speed_mult(enemy)
+        return False
+    enemy._giant_square_chase = True
+    enemy.speed_mult = _giant_chase_speed_mult(enemy)
+    toward = 1 if target.rect.centerx >= enemy.rect.centerx else -1
+    enemy.direction = toward
+    enemy.facing = toward
+    if low_hp:
+        enemy._giant_low_hp_patrol_dir = toward
+    return True
+
+
+def _giant_run_square_chase_move(enemy, player, world, area_group, enemy_group, *, low_hp: bool) -> None:
+    """朝平方塊方向移動；低血量時不讓玩家身體擋路。"""
+    from .enums import ActionTypes
+
+    if getattr(enemy, "_bump_ticks_remaining", 0) > 0:
+        enemy._bump_ticks_remaining = 0
+        enemy._bump_damage_done = True
+    ai_left = enemy.direction == -1
+    ai_right = enemy.direction == 1
+    ai_left, ai_right = enemy._filter_horizontal_move_for_spikes(world, ai_left, ai_right)
+    if not (ai_left or ai_right) and low_hp:
+        enemy.direction *= -1
+        enemy._giant_low_hp_patrol_dir = enemy.direction
+        ai_left = enemy.direction == -1
+        ai_right = enemy.direction == 1
+    ai_left, ai_right, ledge = enemy._apply_chase_move(
+        player,
+        world,
+        area_group,
+        ai_left,
+        ai_right,
+        enemy_group=enemy_group,
+        skip_ledge_brake=True,
+        ignore_player_block=low_hp,
+    )
+    if ledge:
+        enemy.update_action(ActionTypes.IDLE)
+    elif ai_left or ai_right:
+        enemy.update_action(ActionTypes.RUN)
+    else:
+        enemy.update_action(ActionTypes.IDLE)
+
+
+def giant_square_chase_active(enemy) -> bool:
+    return bool(getattr(enemy, "_giant_square_chase", False))
+
+
+def ai_giant_colossus(enemy, player, world, area_group, enemy_group=None) -> None:
+    """臨界巨像：HP≥64 時玩家太近／剛被攻擊則優先玩家；HP<64 只追附近可見平方塊。"""
+    from .enums import ActionTypes
+
+    now_ms = pygame.time.get_ticks()
+    low_hp = float(enemy.health) < GIANT_LOW_HP_THRESHOLD
+    if not low_hp and _giant_should_prioritize_player(enemy, player, now_ms):
+        enemy._giant_square_chase = False
+        enemy.speed_mult = _giant_normal_speed_mult(enemy)
+        enemy._ai_chase_contact_melee(player, world, area_group, enemy_group)
+        return
+
+    _giant_square_block_ai(enemy, world, area_group)
+    if giant_square_chase_active(enemy):
+        _giant_run_square_chase_move(
+            enemy, player, world, area_group, enemy_group, low_hp=low_hp,
+        )
+        return
+    enemy._ai_chase_contact_melee(player, world, area_group, enemy_group)
+
+
+def enemy_blocks_player_physics(enemy) -> bool:
+    """僅臨界巨像對玩家有實體碰撞。"""
+    if not getattr(enemy, "is_alive", True):
+        return False
+    return is_giant_colossus_enemy(enemy)
+
+
+def player_can_stand_on_enemy(enemy) -> bool:
+    """穿透單位（幽靈、面積暴走、小數幽浮等）不可當腳下平台。"""
+    if not getattr(enemy, "is_alive", True):
+        return False
+    if is_tiny_fraction_enemy(enemy):
+        return False
+    if getattr(enemy, "ghost_walls", False) or getattr(enemy, "ghost_area", False):
+        return False
+    if is_giant_colossus_enemy(enemy):
+        return False
+    return True
+
+
+def enemy_body_rect(enemy) -> pygame.Rect:
+    """與 draw() 顯示大小一致的碰撞箱。"""
+    img = enemy.image
+    if img is None:
+        return enemy.rect.copy()
+    h_scale = float(getattr(enemy, "_height_scale", 1.0))
+    w, h = img.get_width(), img.get_height()
+    if abs(h_scale - 1.0) > 0.02:
+        w = max(1, int(w))
+        h = max(1, int(h * h_scale))
+    else:
+        w, h = img.get_width(), img.get_height()
+    body = pygame.Rect(0, 0, w, h)
+    body.center = enemy.rect.center
+    return body
+
+
+CRUSH_ANIM_MS = 5200
+CRUSH_FINAL_ZOOM = 0.52
+CRUSH_VIEW_EDGE_LEFT = 0.92
+CRUSH_VIEW_EDGE_RIGHT = 0.68
+CRUSH_VIEW_EDGE_TOP = 0.85
+CRUSH_VIEW_EDGE_BOTTOM = 0.62
+CRUSH_MIN_HEIGHT_RATIO = 0.22
+
+
+def _crush_viewport_t(now_ms: int, start_ms: int) -> float:
+    raw = min(1.0, max(0.0, (int(now_ms) - int(start_ms)) / CRUSH_ANIM_MS))
+    return raw * raw * (3.0 - 2.0 * raw)
+
+
+def crush_viewport_anim_active(now_ms: int, start_ms: int) -> bool:
+    if not start_ms:
+        return False
+    return (int(now_ms) - int(start_ms)) < CRUSH_ANIM_MS
+
+
+def crush_viewport_done(now_ms: int, start_ms: int) -> bool:
+    if not start_ms:
+        return False
+    return (int(now_ms) - int(start_ms)) >= CRUSH_ANIM_MS
+
+
+def crush_viewport_sample_ms(now_ms: int, start_ms: int) -> int:
+    """取樣時間（動畫結束後定格最後一幀，不重設）。"""
+    if not start_ms:
+        return int(now_ms)
+    return min(int(now_ms), int(start_ms) + CRUSH_ANIM_MS)
+
+
+def find_crush_landing_top_y(player, world, area_group=None, enemy_group=None) -> int | None:
+    """找玩家腳下最近可站立面（含空中落下）。"""
+    fx = int(player.rect.centerx)
+    feet = int(player.rect.bottom)
+    margin_x = max(8, int(player.rect.width * 0.28))
+    search_down = max(960, int(getattr(player, "height", 32)) * 24)
+    best: int | None = None
+
+    def consider(top_y: int) -> None:
+        nonlocal best
+        ty = int(top_y)
+        if ty < feet - 28:
+            return
+        if ty > feet + search_down:
+            return
+        if best is None or ty < best:
+            best = ty
+
+    for _, rect in world.obstacle_list:
+        if rect.right < fx - margin_x or rect.left > fx + margin_x:
+            continue
+        consider(int(rect.top))
+
+    if area_group is not None:
+        for area in list(area_group):
+            if area.rect.right < fx - margin_x or area.rect.left > fx + margin_x:
+                continue
+            sty = area.surface_top_at_world_x(fx)
+            if sty is not None:
+                consider(int(sty))
+
+    if enemy_group is not None:
+        for e in enemy_group:
+            if not getattr(e, "is_alive", True) or not player_can_stand_on_enemy(e):
+                continue
+            er = enemy_body_rect(e)
+            if er.right < fx - margin_x or er.left > fx + margin_x:
+                continue
+            consider(int(er.top))
+
+    return best
+
+
+def snap_player_to_ground_for_crush(player, world, area_group=None, enemy_group=None) -> bool:
+    """空中被壓扁時落到最近地面；成功對齊腳底時回傳 True。"""
+    target = find_crush_landing_top_y(player, world, area_group, enemy_group)
+    if target is None:
+        return False
+    player.rect.bottom = int(target)
+    player.vel_y = 0.0
+    player.is_in_air = False
+    player.is_jump = False
+    player._airborne_since_ms = None
+    player._long_fall_sfx_played = False
+    return True
+
+
+def prepare_player_crush_pose(player) -> None:
+    """壓扁演出使用 Death 動畫（非 Idle）。"""
+    from .enums import ActionTypes
+
+    player.hurt_anim_active = False
+    player.cast_anim_active = False
+    player.cast_anim_hold_last = False
+    player.update_action(ActionTypes.DEATH)
+    frames = player.animation_list.get(ActionTypes.DEATH) or []
+    if frames:
+        player.frame_index = len(frames) - 1
+        player.image = frames[player.frame_index]
+        if hasattr(player, "_sync_sprite_size"):
+            player._sync_sprite_size()
+
+
+def draw_player_crush_squash(surface: pygame.Surface, player, now_ms: int) -> None:
+    """壓扁演出：Death 動畫帧立刻压扁显示。"""
+    from .enums import ActionTypes
+
+    start = int(getattr(player, "crush_anim_start_ms", 0))
+    if not start:
+        player.draw(surface)
+        return
+    cx, _cy = getattr(player, "crush_anim_center", (player.rect.centerx, player.rect.centery))
+    feet_y = int(getattr(player, "crush_anim_feet", player.rect.bottom))
+    frames = player.animation_list.get(ActionTypes.DEATH) or []
+    img = frames[min(player.frame_index, len(frames) - 1)] if frames else player.image
+    if img is None:
+        return
+    if getattr(player, "is_x_flip", False):
+        img = pygame.transform.flip(img, True, False)
+    orig_w = max(1, img.get_width())
+    orig_h = max(1, img.get_height())
+    flat_h = max(2, int(orig_h * CRUSH_MIN_HEIGHT_RATIO))
+    flat_w = max(4, orig_w)
+    flat = pygame.transform.smoothscale(img, (flat_w, flat_h))
+    dest = flat.get_rect(midbottom=(int(cx), feet_y))
+    surface.blit(flat, dest)
+
+
+def crush_death_ui_layout(
+    view_x: int,
+    view_y: int,
+    view_w: int,
+    view_h: int,
+    scale: float,
+    btn_w: int,
+    btn_h: int,
+) -> tuple[pygame.Rect, pygame.Rect]:
+    """視窗座標：YOU DIED 與復活按鈕（壓扁鏡頭結束後疊在視窗上）。"""
+    cx = view_x + view_w // 2
+    cy = view_y + view_h // 2
+    bw = max(80, int(btn_w * scale))
+    bh = max(32, int(btn_h * scale))
+    msg_y = cy - int(60 * scale)
+    btn_rect = pygame.Rect(cx - bw // 2, cy + int(10 * scale), bw, bh)
+    msg_rect = pygame.Rect(view_x, msg_y - 40, view_w, 80)
+    return msg_rect, btn_rect
+
+
+def draw_crush_death_ui_on_window(
+    window: pygame.Surface,
+    font_large,
+    font_med,
+    btn_bg,
+    msg_rect: pygame.Rect,
+    btn_rect: pygame.Rect,
+) -> None:
+    msg = font_large.render("YOU DIED", True, WHITE)
+    window.blit(msg, msg.get_rect(center=msg_rect.center))
+    if btn_bg is not None:
+        bg = pygame.transform.smoothscale(btn_bg, (btn_rect.w, btn_rect.h))
+        window.blit(bg, btn_rect.topleft)
+    else:
+        from .constants import DARK_GRAY
+
+        pygame.draw.rect(window, DARK_GRAY, btn_rect)
+        pygame.draw.rect(window, WHITE, btn_rect, 2)
+    label = font_med.render("復活", True, WHITE)
+    window.blit(label, label.get_rect(center=btn_rect.center))
+
+
+def build_crush_viewport_surface(
+    screen: pygame.Surface,
+    cx: int,
+    cy: int,
+    screen_w: int,
+    screen_h: int,
+    now_ms: int,
+    start_ms: int,
+    *,
+    pad_color: tuple[int, int, int] = (0, 0, 0),
+) -> pygame.Surface:
+    """地圖顯示區四邊以不同速率收斂；最終 crop 以玩家為中心（含黑邊補畫）。"""
+    sample_ms = crush_viewport_sample_ms(now_ms, start_ms)
+    t = _crush_viewport_t(sample_ms, start_ms)
+    final_w = max(32, int(screen_w * CRUSH_FINAL_ZOOM))
+    final_h = max(32, int(screen_h * CRUSH_FINAL_ZOOM))
+    end_l = int(cx) - final_w // 2
+    end_t = int(cy) - final_h // 2
+    end_r = int(cx) + final_w // 2
+    end_b = int(cy) + final_h // 2
+
+    t_l = min(1.0, t * CRUSH_VIEW_EDGE_LEFT)
+    t_r = min(1.0, t * CRUSH_VIEW_EDGE_RIGHT)
+    t_t = min(1.0, t * CRUSH_VIEW_EDGE_TOP)
+    t_b = min(1.0, t * CRUSH_VIEW_EDGE_BOTTOM)
+
+    left = int((1.0 - t_l) * 0 + t_l * end_l)
+    top = int((1.0 - t_t) * 0 + t_t * end_t)
+    right = int((1.0 - t_r) * screen_w + t_r * end_r)
+    bottom = int((1.0 - t_b) * screen_h + t_b * end_b)
+    crop_w = max(1, right - left)
+    crop_h = max(1, bottom - top)
+
+    frame = pygame.Surface((crop_w, crop_h))
+    frame.fill(pad_color)
+    visible = pygame.Rect(left, top, crop_w, crop_h).clip(pygame.Rect(0, 0, screen_w, screen_h))
+    if visible.width > 0 and visible.height > 0:
+        frame.blit(
+            screen,
+            (visible.x - left, visible.y - top),
+            visible,
+        )
+    return frame
+
+
+def crush_viewport_src_rect(
+    cx: int,
+    cy: int,
+    screen_w: int,
+    screen_h: int,
+    now_ms: int,
+    start_ms: int,
+) -> pygame.Rect:
+    """相容舊呼叫：回傳 build 用 crop 範圍（含可能超出螢幕的偏移）。"""
+    sample_ms = crush_viewport_sample_ms(now_ms, start_ms)
+    t = _crush_viewport_t(sample_ms, start_ms)
+    final_w = max(32, int(screen_w * CRUSH_FINAL_ZOOM))
+    final_h = max(32, int(screen_h * CRUSH_FINAL_ZOOM))
+    end_l = int(cx) - final_w // 2
+    end_t = int(cy) - final_h // 2
+    end_r = int(cx) + final_w // 2
+    end_b = int(cy) + final_h // 2
+    t_l = min(1.0, t * CRUSH_VIEW_EDGE_LEFT)
+    t_r = min(1.0, t * CRUSH_VIEW_EDGE_RIGHT)
+    t_t = min(1.0, t * CRUSH_VIEW_EDGE_TOP)
+    t_b = min(1.0, t * CRUSH_VIEW_EDGE_BOTTOM)
+    left = int((1.0 - t_l) * 0 + t_l * end_l)
+    top = int((1.0 - t_t) * 0 + t_t * end_t)
+    right = int((1.0 - t_r) * screen_w + t_r * end_r)
+    bottom = int((1.0 - t_b) * screen_h + t_b * end_b)
+    return pygame.Rect(left, top, max(1, right - left), max(1, bottom - top))
+
+
+def begin_giant_crush_on_player(
+    player,
+    now_ms: int,
+    *,
+    frozen_scroll: int = 0,
+    world=None,
+    area_group=None,
+    enemy_group=None,
+) -> None:
+    from . import game_audio
+
+    if getattr(player, "crush_anim_start_ms", 0):
+        return
+    if world is not None:
+        snap_player_to_ground_for_crush(player, world, area_group, enemy_group)
+    prepare_player_crush_pose(player)
+    player.giant_crush_flatten = True
+    player.giant_crush_kill_at_ms = int(now_ms) + CRUSH_ANIM_MS
+    player.crush_anim_center = (int(player.rect.centerx), int(player.rect.centery))
+    player.crush_anim_feet = int(player.rect.bottom)
+    player.crush_anim_start_ms = int(now_ms)
+    player.crush_frozen_scroll = int(frozen_scroll)
+    player.hurt_anim_active = False
+    player.vel_y = 0.0
+    player.is_in_air = False
+    game_audio.play_giant_crush(at_rect=player.rect)
+    game_audio.stop_bgm()
+
+
+def try_apply_giant_crush(
+    enemy,
+    player,
+    now_ms: int,
+    *,
+    frozen_scroll: int = 0,
+    world=None,
+    area_group=None,
+    enemy_group=None,
+) -> bool:
+    """巨像變大後：玩家與其顯示碰撞箱重疊則進入壓扁（視野收斂）。"""
+    if not is_giant_colossus_enemy(enemy):
+        return False
+    if not enemy.is_alive or not player.is_alive:
+        if is_giant_colossus_enemy(enemy):
+            enemy.pending_crush_player = False
+        return False
+    if not giant_colossus_is_crush_hazard(enemy):
+        return False
+    body = enemy_body_rect(enemy)
+    if not player.rect.colliderect(body):
+        return False
+    if player_on_giant_head(player, enemy):
+        return False
+    enemy.pending_crush_player = False
+    scroll = int(frozen_scroll) if frozen_scroll else int(getattr(player, "crush_frozen_scroll", 0))
+    begin_giant_crush_on_player(
+        player,
+        now_ms,
+        frozen_scroll=scroll,
+        world=world,
+        area_group=area_group,
+        enemy_group=enemy_group,
+    )
+    return True
 
 
 def is_calc_tank_enemy(enemy) -> bool:
@@ -373,32 +1093,44 @@ def _calc_tank_algebra(enemy, kind: str) -> None:
 def _tiny_fraction_algebra(enemy, kind: str) -> None:
     label = getattr(enemy, "math_label", "0.01")
     if kind == "sqrt":
-        if label == "0.01":
+        if label == "0.0001":
+            enemy.math_label = "0.01"
+            enemy.head_label = "0.01"
+            enemy.max_health = 0.01
+            enemy.health = 0.01
+            enemy.speed_mult = 10.0
+            enemy.scale_mult = 0.1
+            enemy.shoot_cd_mult = 1.0 / 3.0
+            enemy.invincible = True
+        elif label == "0.01":
             enemy.math_label = "0.1"
             enemy.head_label = "0.1"
+            enemy.max_health = 0.1
+            enemy.health = 0.1
             enemy.speed_mult = 1.0
             enemy.scale_mult = 1.0
             enemy.invincible = False
             enemy.shoot_cd_mult = 1.0 / 3.0
-        elif label == "0.0001":
+        elif label == "0.1":
             enemy.math_label = "0.01"
             enemy.head_label = "0.01"
+            enemy.max_health = 0.01
+            enemy.health = 0.01
             enemy.speed_mult = 10.0
             enemy.scale_mult = 0.1
             enemy.shoot_cd_mult = 1.0 / 3.0
             enemy.invincible = False
-        elif label == "0.1":
-            enemy.math_label = "0.01"
-            enemy.head_label = "0.01"
-            enemy.speed_mult = 10.0
-            enemy.scale_mult = 0.1
-            enemy.shoot_cd_mult = 1.0 / 3.0
     elif kind == "square":
         if label == "0.01":
             enemy.math_label = "0.0001"
             enemy.head_label = "0.0001"
+            enemy.max_health = 0.0001
+            enemy.health = 0.0001
             enemy.invincible = True
+            enemy.speed_mult = 10.0
+            enemy.scale_mult = 0.1
             enemy.shoot_cd_mult = 1.0 / 5.0
+    _refresh_appearance(enemy)
 
 
 def _init_enemy_imaginary_state(enemy) -> None:
@@ -434,8 +1166,8 @@ def _neg_one_algebra(enemy, kind: str) -> None:
 
 def _apply_giant_scaled_stats(enemy, *, hp_ratio: float | None = None) -> None:
     """依累積倍率更新巨像 HP／體型（不再定時還原）。"""
-    base_hp = float(getattr(enemy, "_giant_base_max_hp", 256.0))
-    base_sc = float(getattr(enemy, "_giant_base_scale", 1.0))
+    base_hp = float(getattr(enemy, "_giant_base_max_hp", 512.0))
+    base_sc = float(getattr(enemy, "_giant_base_scale", 2.0))
     base_spd = float(getattr(enemy, "_giant_base_speed_mult", 0.25))
     hp_f = max(GIANT_HP_FACTOR_MIN / base_hp, float(getattr(enemy, "_giant_hp_factor", 1.0)))
     sc_f = max(GIANT_SCALE_FACTOR_MIN, float(getattr(enemy, "_giant_scale_factor", 1.0)))
@@ -449,7 +1181,7 @@ def _apply_giant_scaled_stats(enemy, *, hp_ratio: float | None = None) -> None:
     enemy.max_health = max(GIANT_HP_FACTOR_MIN, base_hp * hp_f)
     enemy.health = min(enemy.max_health, max(1.0, enemy.max_health * ratio))
     enemy.scale_mult = max(GIANT_SCALE_FACTOR_MIN, base_sc * sc_f)
-    enemy.speed_mult = max(0.08, base_spd * (1.0 / sc_f))
+    enemy.speed_mult = _giant_normal_speed_mult(enemy)
     enemy.head_label = str(int(round(enemy.max_health)))
     enemy._giant_grown_until_ms = 0
     enemy._giant_reverting = False
@@ -461,17 +1193,20 @@ def _giant_algebra(enemy, kind: str) -> None:
 
     if kind in ("square", "sqrt"):
         game_audio.play_giant_crush(at_rect=enemy.rect)
+    alg_spd = float(getattr(enemy, "_giant_algebra_speed_mult", 1.0))
     if kind == "square":
         enemy.pending_crush_player = True
         enemy._giant_hp_factor = float(getattr(enemy, "_giant_hp_factor", 1.0)) * 2.0
         enemy._giant_scale_factor = float(getattr(enemy, "_giant_scale_factor", 1.0)) * 1.3
+        enemy._giant_algebra_speed_mult = alg_spd / GIANT_ALGEBRA_SPEED_MULT
         _apply_giant_scaled_stats(enemy)
     elif kind == "sqrt":
         hp_f = float(getattr(enemy, "_giant_hp_factor", 1.0)) * 0.5
         sc_f = float(getattr(enemy, "_giant_scale_factor", 1.0))
         excess = max(0.0, sc_f - GIANT_SCALE_FACTOR_MIN)
-        enemy._giant_hp_factor = max(GIANT_HP_FACTOR_MIN / float(getattr(enemy, "_giant_base_max_hp", 256.0)), hp_f)
+        enemy._giant_hp_factor = max(GIANT_HP_FACTOR_MIN / float(getattr(enemy, "_giant_base_max_hp", 512.0)), hp_f)
         enemy._giant_scale_factor = GIANT_SCALE_FACTOR_MIN + excess * GIANT_SQRT_SHRINK_KEEP
+        enemy._giant_algebra_speed_mult = alg_spd * GIANT_ALGEBRA_SPEED_MULT
         _apply_giant_scaled_stats(enemy)
 
 
@@ -1342,10 +2077,11 @@ def ai_exp_flyer(enemy, player, world, area_group, enemy_group) -> None:
         enemy.update_action(ActionTypes.RUN)
         return
 
+    in_bump_range = dist < TILE_SIZE * 3 or enemy.rect.colliderect(player.rect)
     if (
         enemy._bump_ticks_remaining <= 0
         and now >= enemy._bump_next_ready_ms
-        and dist < TILE_SIZE * 3
+        and in_bump_range
         and player.is_alive
     ):
         enemy._bump_ticks_remaining = 18
@@ -1368,38 +2104,94 @@ def after_enemy_move_wall_check(enemy, world, now_ms: int) -> None:
 
 def display_label(enemy) -> str:
     if is_calc_tank_enemy(enemy):
+        if int(getattr(enemy, "_calc_tank_x_exp", 0)) == 0:
+            return str(int(round(float(enemy.health))))
         return _calc_tank_label(enemy)
+    if is_giant_colossus_enemy(enemy):
+        return str(int(round(float(enemy.health))))
     if getattr(enemy, "head_label", None):
         return str(enemy.head_label)
     if getattr(enemy, "math_label", None):
         return str(enemy.math_label)
+    suffix = getattr(enemy, "label_suffix", None)
+    if suffix == "e^x":
+        return f"{int(round(enemy.health))}e^x"
     return f"{enemy.health:.2f}"
 
 
-def blit_enemy_head_label(screen, font, enemy, color=(255, 255, 255)) -> None:
-    """繪製頭上標籤；e^x 用上標 x 避免缺字。"""
+def _render_exp_superscript_label(
+    font,
+    main_text: str,
+    color: tuple[int, int, int],
+    *,
+    gap_after_main: int = 4,
+) -> pygame.Surface:
+    """主文字 + 上標 e^x（主文字可為空，僅顯示 e^x）。"""
     from .fonts import get_font
 
+    parts: list[tuple[pygame.Surface, int, int]] = []
+    x_off = 4
+    y_pad = 2
+    e_img = font.render("e", True, color)
+    x_font = get_font(max(12, int(font.get_height() * 0.7)), bold=True)
+    x_img = x_font.render("x", True, color)
+    row_h = max(
+        font.get_height(),
+        e_img.get_height(),
+        x_img.get_height() + 6,
+    )
+    baseline_bottom = y_pad + row_h
+    if main_text:
+        main_img = font.render(main_text, True, color)
+        parts.append((main_img, x_off, baseline_bottom - main_img.get_height()))
+        x_off += main_img.get_width() + gap_after_main
+    e_y = baseline_bottom - e_img.get_height()
+    x_y = baseline_bottom - x_img.get_height() - 5
+    parts.append((e_img, x_off, e_y))
+    parts.append((x_img, x_off + e_img.get_width(), x_y))
+    w = x_off + e_img.get_width() + x_img.get_width() + 4
+    surf_h = row_h + y_pad * 2
+    surf = pygame.Surface((w, surf_h + 4), pygame.SRCALPHA)
+    surf.fill((0, 0, 0, 140))
+    for img, px, py in parts:
+        surf.blit(img, (px, py))
+    return surf
+
+
+def blit_enemy_head_label(screen, font, enemy, color=(255, 255, 255)) -> None:
+    """繪製頭上標籤；e^x 用上標 x 避免缺字。標籤文字不變時重用快取 surface。"""
+    from .enemy_archetypes import is_tiny_fraction_enemy
+
     label = display_label(enemy)
+    draw_font = font
+    if is_tiny_fraction_enemy(enemy):
+        from .fonts import get_font
+
+        draw_font = get_font(max(font.get_height(), 16), bold=True)
+    cache_key = (label, color, draw_font.get_height())
+    cached = getattr(enemy, "_head_label_cache", None)
     cx = enemy.rect.centerx
     base_y = enemy.rect.top - 6
-    if is_exp_flyer_enemy(enemy) and label in ("e^x", "eˣ"):
-        e_img = font.render("e", True, color)
-        x_font = get_font(max(12, int(font.get_height() * 0.7)), bold=True)
-        x_img = x_font.render("x", True, color)
-        w = e_img.get_width() + x_img.get_width()
-        h = max(e_img.get_height(), x_img.get_height() + 6)
-        bg = pygame.Surface((w + 8, h + 4), pygame.SRCALPHA)
-        bg.fill((0, 0, 0, 140))
-        x0 = cx - w // 2
-        y0 = base_y - h
-        screen.blit(bg, (x0 - 4, y0 - 2))
-        screen.blit(e_img, (x0, y0 + h - e_img.get_height()))
-        screen.blit(x_img, (x0 + e_img.get_width(), y0 + h - x_img.get_height() - 5))
+    if cached is not None and cached.get("key") == cache_key:
+        screen.blit(cached["surf"], cached["surf"].get_rect(midbottom=(cx, base_y)))
         return
-    hp_img = font.render(label, True, color)
+
+    suffix = getattr(enemy, "label_suffix", None)
+    if suffix == "e^x" and not getattr(enemy, "head_label", None):
+        main_text = str(int(round(enemy.health)))
+        surf = _render_exp_superscript_label(draw_font, main_text, color, gap_after_main=0)
+        enemy._head_label_cache = {"key": cache_key, "surf": surf}
+        screen.blit(surf, surf.get_rect(midbottom=(cx, base_y)))
+        return
+    if label in ("e^x", "eˣ"):
+        surf = _render_exp_superscript_label(draw_font, "", color)
+        enemy._head_label_cache = {"key": cache_key, "surf": surf}
+        screen.blit(surf, surf.get_rect(midbottom=(cx, base_y)))
+        return
+    hp_img = draw_font.render(label, True, color)
     hp_rect = hp_img.get_rect(midbottom=(cx, base_y))
-    bg = pygame.Surface((hp_rect.width + 8, hp_rect.height + 4), pygame.SRCALPHA)
-    bg.fill((0, 0, 0, 140))
-    screen.blit(bg, (hp_rect.x - 4, hp_rect.y - 2))
-    screen.blit(hp_img, hp_rect)
+    surf = pygame.Surface((hp_rect.width + 8, hp_rect.height + 4), pygame.SRCALPHA)
+    surf.fill((0, 0, 0, 140))
+    surf.blit(hp_img, (4, 2))
+    enemy._head_label_cache = {"key": cache_key, "surf": surf}
+    screen.blit(surf, surf.get_rect(midbottom=(cx, base_y)))

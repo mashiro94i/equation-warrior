@@ -276,7 +276,9 @@ class AreaBody(pygame.sprite.Sprite):
 
         # 同 frame：敵人優先
         for enemy in list(enemy_group):
-            if enemy.is_alive and self.intersects_rect(enemy.rect):
+            from .enemy_special import enemy_body_rect
+
+            if enemy.is_alive and self.intersects_rect(enemy_body_rect(enemy)):
                 enemy.take_damage(self.damage)
                 game_audio.play_break(at_rect=self.rect)
                 self.kill()

@@ -21,8 +21,10 @@ _PREVIEW_BELOW_CURSOR_PX = 22
 _PREVIEW_SURF_CACHE: dict[tuple[str, str], pygame.Surface] = {}
 
 from . import game_audio
+from .enemy_archetypes import GID_CHASHER, GID_SHOOTER
 from .enums import PowerType
 from .projectile import MathProjectile
+from .soldier import Player
 from .fonts import get_font
 
 
@@ -106,7 +108,9 @@ class CalculusBlock(pygame.sprite.Sprite):
                         return
 
         self.vel_y += CALC_BLOCK_GRAVITY
-        self.rect.y += int(self.vel_y)
+        step_y = int(self.vel_y)
+        prev_bottom = self.rect.bottom
+        self.rect.y += step_y
 
         if self.rect.bottom >= SCREEN_HEIGHT:
             self._land_on_rect_top(SCREEN_HEIGHT)
@@ -114,7 +118,16 @@ class CalculusBlock(pygame.sprite.Sprite):
         for _img, orect in world.obstacle_list:
             if not self.rect.colliderect(orect):
                 continue
-            if self.rect.centery <= orect.centery:
+            foot_overlap = min(self.rect.right, orect.right) - max(self.rect.left, orect.left)
+            if foot_overlap < max(6, self.rect.width // 3):
+                continue
+            if self.vel_y < 0:
+                continue
+            if self.rect.bottom <= orect.top:
+                continue
+            if self.rect.top >= orect.bottom:
+                continue
+            if prev_bottom <= orect.top + 4 or step_y > 0:
                 self._land_on_rect_top(orect.top)
 
         for other in list(same_group):
@@ -259,17 +272,23 @@ def resolve_calculus_block_interactions(
         return
 
     for enemy in list(enemy_group):
-        if enemy.is_alive and block.rect.colliderect(enemy.rect):
-            from .enemy_special import on_calculus_block_hit
+        from .enemy_special import enemy_collides_rect, on_calculus_block_hit, try_apply_giant_crush
 
+        if enemy_collides_rect(enemy, block.rect):
             if on_calculus_block_hit(enemy, block.kind):
+                try_apply_giant_crush(enemy, player, pygame.time.get_ticks())
                 block.kill()
                 game_audio.play_calculus_effect(at_rect=block.rect)
                 return
             if block.kind == "derivative":
                 enemy.calc_frozen = True
+                if int(enemy.enemy_gid) in (GID_CHASHER, GID_SHOOTER):
+                    Player.show_center_notice(player, "你微分了線性移動！")
             else:
+                was_frozen = bool(getattr(enemy, "calc_frozen", False))
                 enemy.calc_frozen = False
+                if was_frozen and int(enemy.enemy_gid) in (GID_CHASHER, GID_SHOOTER):
+                    Player.show_center_notice(player, "你積分了0移動")
             block.kill()
             game_audio.play_calculus_effect(at_rect=block.rect)
             return
@@ -388,11 +407,12 @@ def resolve_algebra_block_interactions(
         return
     if enemy_group is not None:
         for enemy in list(enemy_group):
-            if enemy.is_alive and block.rect.colliderect(enemy.rect):
-                from .enemy_special import on_calculus_block_hit
+            from .enemy_special import enemy_collides_rect, on_calculus_block_hit, try_apply_giant_crush
 
+            if enemy_collides_rect(enemy, block.rect):
                 kind = "square" if block.kind == "square" else "sqrt"
                 if on_calculus_block_hit(enemy, kind):
+                    try_apply_giant_crush(enemy, player, pygame.time.get_ticks())
                     block.kill()
                     game_audio.play_calculus_effect(at_rect=block.rect)
                     return

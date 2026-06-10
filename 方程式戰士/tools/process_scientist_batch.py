@@ -8,7 +8,7 @@ from pathlib import Path
 
 GAME_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = GAME_ROOT / "tools" / "generate2dsprite.py"
-PIPELINE = GAME_ROOT / "assets" / "img" / "player" / "scientist" / "_pipeline"
+PIPELINE = GAME_ROOT / "tools" / "scientist_pipeline"
 ASSETS = Path(
     r"C:\Users\O0mashiro0O\.cursor\projects\c-Users-O0mashiro0O-OneDrive-Desktop-code-Python\assets"
 )

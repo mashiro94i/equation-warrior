@@ -76,13 +76,13 @@
 ## 二、敵人一覽（名稱 · GID · 程式數值）
 
 圖片與地圖編輯器左欄相同：  
-`GID = 256 + 素材包頁序 × 65536 + 該頁格索引`（見 `map_editor/asset_packs.py` 的 `gid_for`）。  
+`GID = 256 + 素材包頁序 × 65536 + 該頁格索引`（見 `core/kenney/asset_packs.py` 的 `gid_for`）。  
 匯出 PNG 用 `sheet_palette.extract_tile_surface` 對應 Kenney 原檔（來源列表見 `docs/img/enemies/sources.txt`）。
 
 | 圖 | 名稱 | GID | HP | speed× | AI | 一句話 |
 |:--:|------|-----|-----|--------|-----|--------|
-| <img src="./docs/img/enemies/65834.png" width="56" alt="65834"/> | **普通近戰** | 65834 | 100 | 1.0 | `chase_melee` | 衝刺近戰、不射擊 |
-| <img src="./docs/img/enemies/65838.png" width="56" alt="65838"/> | **普通遠程** | 65838 | 100 | 1.0 | `default` | 巡邏＋視野射擊 |
+| <img src="./docs/img/enemies/65834.png" width="56" alt="65834"/> | **普通近戰** | 65834 | 100 | 1.0 | `chase_melee` | 衝刺近戰；頭上 **HP + e^x** |
+| <img src="./docs/img/enemies/65838.png" width="56" alt="65838"/> | **普通遠程** | 65838 | 100 | 1.0 | `default` | 巡邏射擊；頭上 **HP + e^x** |
 | <img src="./docs/img/enemies/65822.png" width="56" alt="65822"/> | **面積暴走** | 65822 | 75 | 1.0 | `area_spray` | 優先轟靜止面積 |
 | <img src="./docs/img/enemies/65820.png" width="56" alt="65820"/> | **小數幽浮** | 65820 | 0.01 | **10** | `tiny_fraction` | 極小極快；平方／根號變身 |
 | <img src="./docs/img/enemies/65823.png" width="56" alt="65823"/> | **虛數幽靈** | 65823 | 1 | 1.0 | `neg_one`／`imaginary` | -1 僅治療彈；根號→i 穿牆 |
@@ -105,6 +105,7 @@
 | 項目 | 程式值                                                                         |
 | ---- | ------------------------------------------------------------------------------ |
 | HP   | 100                                                                            |
+| 頭上 | 當前 HP + **e^x**（上標 x）                                                    |
 | 移動 | `chase_aggressive`，視野內追玩家                                               |
 | 衝刺 | 約 **1.2 s** 冷卻；**18 幀**、有效速度約 **2.5×**；該段**單次**近戰傷害（100） |
 | 射擊 | 無                                                                             |
@@ -121,6 +122,7 @@
 | 項目 | 程式值                       |
 | ---- | ---------------------------- |
 | HP   | 100                          |
+| 頭上 | 當前 HP + **e^x**（上標 x）  |
 | 子彈 | 瞄準玩家直線飛行             |
 | 地形 | 懸崖前煞車／轉向；避伸出地刺 |
 

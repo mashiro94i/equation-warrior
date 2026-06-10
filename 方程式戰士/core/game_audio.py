@@ -53,6 +53,10 @@ _EXP_ENTER_VOLUME_MULT = 1
 _BGM_PLAYBACK_MULT = 0.25
 _UNDERWATER_BUBBLES_VOLUME_MULT = 0.55 * 2
 _BUBBLE_VOLUME_MULT = 2.0
+_PICKUP_THROTTLE_MS = 90
+_SPIKE_HIT_THROTTLE_MS = 120
+_last_pickup_ms = 0
+_last_spike_hit_ms = 0
 _SCREEN_VIEW: pygame.Rect | None = None
 
 
@@ -370,8 +374,14 @@ def play_calculus_place(at_rect=None) -> None:
 
 
 def play_pickup(at_rect=None) -> None:
+    """拾取音效；短時間內合併，避免連續吃愛心等卡頓。"""
+    global _last_pickup_ms
     if not _sfx_allowed(at_rect):
         return
+    now_ms = pygame.time.get_ticks()
+    if now_ms - _last_pickup_ms < _PICKUP_THROTTLE_MS:
+        return
+    _last_pickup_ms = now_ms
     _play(_pickup_sound)
 
 
@@ -472,8 +482,14 @@ def is_bubble_repeat_active() -> bool:
 
 
 def play_spike_hit(at_rect=None) -> None:
+    """地刺受傷音效；短時間內合併，多怪同時踩刺時減輕卡頓。"""
+    global _last_spike_hit_ms
     if not _sfx_allowed(at_rect):
         return
+    now_ms = pygame.time.get_ticks()
+    if now_ms - _last_spike_hit_ms < _SPIKE_HIT_THROTTLE_MS:
+        return
+    _last_spike_hit_ms = now_ms
     _play(_spike_hit_sound)
 
 

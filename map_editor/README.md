@@ -26,9 +26,12 @@ python -m map_editor.run
 
 ## 存檔與載入
 
-- 存檔路徑：`map_editor/map/level{N}.csv`（N 為目前 Level 數字）；翻轉狀態為同目錄 `level{N}_flip.csv`。
-- 圖塊 PNG（可選）：`map_editor/img/tile/<id>.png`（id 與格內數字相同）；若無則用程式內建 placeholder。
-- 若要給 **方程式戰士** 使用，可將 `level{N}.csv` 複製到 `方程式戰士/map/`（或沿用 `level{N}_data.csv` 檔名）；遊戲會優先讀 `level{N}.csv`。
+- **Save** 會同時寫入兩處（無需手動複製）：
+  1. `map_editor/map/level{N}.csv` + `level{N}_flip.csv`
+  2. `方程式戰士/map/`（同名鏡像）
+- **Load** 仍從 `map_editor/map/` 讀取。
+- 主遊戲讀檔優先 `map_editor/map/`，其次 `方程式戰士/map/`。
+- 圖塊 PNG（可選）：`assets/img/tile/<id>.png`（與主遊戲相同路徑）。
 
 ### Kenney 格編號語意（與主遊戲 `tile_types.py` 同步）
 

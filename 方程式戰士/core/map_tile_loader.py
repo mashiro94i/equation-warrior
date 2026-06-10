@@ -1,25 +1,22 @@
-"""關卡 CSV 用數字圖塊：與 map_editor 相同編號，PNG 放 `assets/img/tile/<id>.png`。"""
+"""關卡 CSV 用數字圖塊：PNG 放 `assets/img/tile/<id>.png`。"""
 from __future__ import annotations
-
-from pathlib import Path
 
 import pygame
 
+from .paths import ASSETS_TILE
+
 _CACHE: dict[tuple[int, int], pygame.Surface | None] = {}
-
-
-def _tile_png_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "assets" / "img" / "tile"
+_TILE_PNG_DIR = ASSETS_TILE
 
 
 def surface_for_csv_tile(tile_id: int, size: int) -> pygame.Surface | None:
-    """有 `assets/img/tile/<id>.png` 則載入並縮放；無則回傳 None（沿用 assets 內建圖）。"""
+    """有 `assets/img/tile/<id>.png` 則載入並縮放；無則回傳 None。"""
     if tile_id < 0:
         return None
     key = (tile_id, size)
     if key in _CACHE:
         return _CACHE[key]
-    path = _tile_png_dir() / f"{tile_id}.png"
+    path = _TILE_PNG_DIR / f"{tile_id}.png"
     if not path.is_file():
         _CACHE[key] = None
         return None
@@ -45,12 +42,11 @@ def make_colored_stub(size: int, rgb: tuple[int, int, int]) -> pygame.Surface:
 
 
 def make_kenney_pack_stub(size: int) -> pygame.Surface:
-    """地圖含 Kenney 大編號時，主遊戲以簡單色塊當障礙顯示。"""
     return make_colored_stub(size, (88, 92, 104))
 
 
 def surface_for_gid(tile_id: int, size: int, fallback_rgb: tuple[int, int, int] | None = None) -> pygame.Surface | None:
-    """assets/img/tile → Kenney 包 → 語意色佔位；皆無則 None（空氣）。"""
+    """assets/img/tile → Kenney 包 → 語意色佔位；皆無則 None。"""
     s = surface_for_csv_tile(tile_id, size)
     if s is not None:
         return s

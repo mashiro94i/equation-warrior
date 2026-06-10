@@ -23,7 +23,7 @@ cd 方程式戰士
 python -m unittest discover -v
 ```
 
-- **地圖**：優先讀 `../map_editor/map/level{N}.csv`（及 `level{N}_flip.csv` 等）；若無則用本專案 `map/`。
+- **地圖**：編輯器 Save 會同步寫入 `map_editor/map/` 與 `map/`；遊戲讀檔優先前者。
 - **設定**：本機 `settings.json`（不入版控）儲存 BGM／音效音量與解析度；首次執行或無檔時 **BGM／音效皆預設 50%**（`core/settings_io.py`）。
 
 ---
@@ -98,7 +98,7 @@ python -m unittest discover -v
 │   ├── projectile.py / controller.py / interactions.py
 │   └── …
 ├── assets/audio/           # wav／mp3
-├── map/                    # 關卡 CSV 備援
+├── map/                    # 關卡 CSV（map_editor Save 時自動鏡像）
 ├── test_game.py
 ├── README.md
 ├── 具體遊戲玩法.md
@@ -112,7 +112,7 @@ python -m unittest discover -v
 | 目錄 | 說明 |
 |------|------|
 | `kenny_assets/` | Kenney 圖塊包（玩家／敵人／UI 等） |
-| `map_editor/` | 地圖編輯器；`map/*.csv` 為遊戲主要關卡來源 |
+| `map_editor/` | 地圖編輯器；Save 同步寫入 `map_editor/map/` 與 `方程式戰士/map/` |
 
 - **玩家外觀**：`kenney_tiny-dungeon` 的 `tile_0084` 等；缺檔時幾何 fallback。
 - **尺寸**：`constants.py` 內 `TILE_SIZE_USER`、`PLAYER_VISUAL_SCALE`、`ENEMY_VISUAL_SCALE`。

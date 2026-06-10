@@ -460,10 +460,17 @@ class TestTileTypes(unittest.TestCase):
 
         self.assertEqual(classify_tile(GID_KEY), "key_pickup")
         self.assertEqual(classify_tile(GID_KEY_DOOR), "key_door")
-        from core.tile_types import GID_MAP_CALC_DERIVATIVE_BLOCK, GID_MAP_CALC_INTEGRAL_BLOCK
+        from core.tile_types import (
+            GID_MAP_CALC_DERIVATIVE_BLOCK,
+            GID_MAP_CALC_INTEGRAL_BLOCK,
+            GID_MAP_CALC_SQUARE_BLOCK,
+            GID_MAP_CALC_SQRT_BLOCK,
+        )
 
         self.assertEqual(classify_tile(GID_MAP_CALC_INTEGRAL_BLOCK), "map_calc_integral")
         self.assertEqual(classify_tile(GID_MAP_CALC_DERIVATIVE_BLOCK), "map_calc_derivative")
+        self.assertEqual(classify_tile(GID_MAP_CALC_SQUARE_BLOCK), "map_calc_square")
+        self.assertEqual(classify_tile(GID_MAP_CALC_SQRT_BLOCK), "map_calc_sqrt")
 
 
 class TestCsvMapAreaCells(unittest.TestCase):
@@ -550,6 +557,12 @@ class TestWorldCSVLoad(unittest.TestCase):
         w.process_csv(2)
         self.assertGreater(w.level_cols, 0)
         self.assertGreater(len(w.enemy_spawns), 0)
+
+    def test_load_level3_square_sqrt_map_blocks(self):
+        w = World()
+        w.process_csv(3)
+        self.assertGreater(len(w.calculus_square_spawns), 0)
+        self.assertGreater(len(w.calculus_sqrt_spawns), 0)
 
     def test_find_map_dir_prefers_map_editor(self):
         from core.paths import MAP_EDITOR_MAP_DIR, find_map_dir_for_level

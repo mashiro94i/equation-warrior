@@ -24,6 +24,8 @@ from .tile_types import (
     GID_KEY_DOOR,
     GID_MAP_CALC_DERIVATIVE_BLOCK,
     GID_MAP_CALC_INTEGRAL_BLOCK,
+    GID_MAP_CALC_SQUARE_BLOCK,
+    GID_MAP_CALC_SQRT_BLOCK,
     GID_SPIKE,
     GID_SPIKE_SWITCH,
     GID_SPAWN,
@@ -95,6 +97,8 @@ _SEMANTIC_RGB = {
     GID_KEY_DOOR: (120, 90, 50),
     GID_MAP_CALC_INTEGRAL_BLOCK: (90, 140, 220),
     GID_MAP_CALC_DERIVATIVE_BLOCK: (220, 140, 90),
+    GID_MAP_CALC_SQUARE_BLOCK: (200, 120, 220),
+    GID_MAP_CALC_SQRT_BLOCK: (120, 200, 180),
 }
 
 
@@ -268,6 +272,7 @@ class World:
         # 每格獨立 surface；玩家碰觸瞬間水平 flip
         self._spike_obstacles: list[dict] = []
         self._spike_touch_prev: set[tuple[int, int]] = set()
+        self._spike_damage_cache: list[pygame.Rect] | None = None
         self.obstacle_list: list[tuple[pygame.Surface, pygame.Rect]] = []
         self.player_spawn = (TILE_SIZE * 1, TILE_SIZE * 12)
         self.respawn_point: tuple[int, int] | None = None
@@ -286,6 +291,8 @@ class World:
         self.flip_x_grid: list[list[bool]] = []
         self.calculus_derivative_spawns: list[tuple[int, int]] = []
         self.calculus_integral_spawns: list[tuple[int, int, str]] = []
+        self.calculus_square_spawns: list[tuple[int, int]] = []
+        self.calculus_sqrt_spawns: list[tuple[int, int]] = []
         self._spike_switch_tiles: list[tuple[pygame.Surface, pygame.Rect]] = []
         self._animated_wall_entries: list[dict] = []
         self._anim_last_ms = 0
@@ -382,7 +389,7 @@ class World:
     def toggle_spikes(self) -> None:
         """機關：伸出 ↔ 收回地刺。"""
         self.spikes_extended = not self.spikes_extended
-        self.rebuild_obstacle_list()
+        self._spike_damage_cache = None
 
     def try_toggle_spike_switch(
         self,
@@ -451,7 +458,9 @@ class World:
     def spike_damage_rects(self) -> list[pygame.Rect]:
         if not self.spikes_extended:
             return []
-        return [sp["rect"].copy() for sp in self._spike_obstacles]
+        if self._spike_damage_cache is None:
+            self._spike_damage_cache = [sp["rect"].copy() for sp in self._spike_obstacles]
+        return self._spike_damage_cache
 
     def update_spike_flip_on_player_contact(self, player_rect: pygame.Rect) -> None:
         """玩家進入地刺格瞬間（上升沿）將該格圖像水平翻轉。"""
@@ -490,13 +499,14 @@ class World:
     def process_csv(self, level, base_dir=None):
         """
         讀取 `level{level}.csv` 或 `level{level}_data.csv`。
-        base_dir 為 None 時：優先 `map_editor/map/`，其次 `方程式戰士/map/`。
+        base_dir 為 None 時：優先 `map_editor/map/`，其次 `方程式戰士/map/`（編輯器存檔時同步鏡像）。
         """
         self._wall_obstacles.clear()
         self._animated_wall_entries.clear()
         self._anim_last_ms = 0
         self._spike_obstacles.clear()
         self._spike_touch_prev.clear()
+        self._spike_damage_cache = None
         self.obstacle_list.clear()
         self.enemy_spawns.clear()
         self.water_tiles.clear()
@@ -513,6 +523,8 @@ class World:
         self.flip_x_grid.clear()
         self.calculus_derivative_spawns.clear()
         self.calculus_integral_spawns.clear()
+        self.calculus_square_spawns.clear()
+        self.calculus_sqrt_spawns.clear()
         self._spike_switch_tiles.clear()
         self.spikes_extended = True
         self._switch_latch = False
@@ -593,6 +605,14 @@ class World:
                     cx = wx + TILE_SIZE // 2
                     cy = wy + TILE_SIZE // 2
                     self.calculus_integral_spawns.append((cx, cy, "y"))
+                elif kind == "map_calc_square":
+                    cx = wx + TILE_SIZE // 2
+                    cy = wy + TILE_SIZE // 2
+                    self.calculus_square_spawns.append((cx, cy))
+                elif kind == "map_calc_sqrt":
+                    cx = wx + TILE_SIZE // 2
+                    cy = wy + TILE_SIZE // 2
+                    self.calculus_sqrt_spawns.append((cx, cy))
                 elif kind == "destructible_wall":
                     img = _tile_surface_display(tile, flip_x) or make_colored_stub(
                         TILE_SIZE, _SEMANTIC_RGB.get(tile, (170, 110, 70))

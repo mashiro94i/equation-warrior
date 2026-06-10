@@ -11,7 +11,7 @@ from .constants import (
 )
 from .constants import player_scientist_visual_scale
 from .enums import IntegralAxis, PlayerMode
-from .paths import PLAYER_KENNEY_TILE
+from .paths import ASSETS_IMG, ASSETS_TILE, GAME_ROOT, PLAYER_KENNEY_TILE, SCIENTIST_PIPELINE_DIR
 
 # Kenney input-prompts-pixel（地圖編輯器 GID）
 CURSOR_GID_CALC = 834
@@ -20,13 +20,14 @@ CURSOR_GID_AREA_DRAG = 838
 
 # ---------------------------------------------------------------------------
 # `方程式戰士/assets/img/` — 唯一讀檔根目錄（不依賴執行時工作目錄）
-# 建議目錄：
-#   img/player/<Action>/   *.png  角色動畫
-#   img/enemy/<Action>/    *.png
-#   img/tiles/obstacle.png, water_0.png, …  關卡磚（可選）
-#   img/ui/cursor.png, cursor_calc.png, cursor_brush.png, …  游標（可選）
+# 執行期目錄（見 assets/README.md）：
+#   img/player/scientist/<Action>/   玩家動畫
+#   img/tile/<name>.png              磚覆寫（GID 或 obstacle.png 等）
+#   img/ui/cursor_*.png              游標
+# 敵人 Kenney GID → core/kenney + kenny_assets/
+# 素材管線 → tools/scientist_pipeline/
 # ---------------------------------------------------------------------------
-_ASSETS_IMG_ROOT = Path(__file__).resolve().parent.parent / "assets" / "img"
+_ASSETS_IMG_ROOT = ASSETS_IMG
 
 _tile_cache: dict[str, pygame.Surface] = {}
 _player_kenney_cache: dict[float, pygame.Surface] = {}
@@ -99,6 +100,10 @@ def load_img_png_scaled(relative_under_img: str, scale: float) -> pygame.Surface
     )
 
 
+def scientist_pipeline_root() -> Path:
+    return SCIENTIST_PIPELINE_DIR
+
+
 def player_scientist_root() -> Path:
     return _ASSETS_IMG_ROOT / "player" / "scientist"
 
@@ -147,7 +152,7 @@ def load_player_scientist_frames(action_name: str, scale: float) -> list:
                 frames.append(surf)
         if len(frames) == 2:
             return frames
-        pipe = player_scientist_root() / "_pipeline" / "Jump"
+        pipe = scientist_pipeline_root() / "Jump"
         for fname in ("jump-1.png", "jump-2.png"):
             p = pipe / fname
             if p.is_file():
@@ -192,7 +197,7 @@ def load_potion_projectile_frames(scale: float = 1.0) -> list:
             if surf is not None:
                 frames.append(surf)
     if not frames:
-        pipe = player_scientist_root() / "_pipeline" / "projectile"
+        pipe = scientist_pipeline_root() / "projectile"
         for i in (3, 4):
             p = pipe / f"projectile-{i}.png"
             if p.is_file():
@@ -261,10 +266,18 @@ def load_soldier_action_frames(char_key: str, action_name: str, scale: float, *,
 
 
 def _try_tile_png(filename: str) -> pygame.Surface | None:
-    surf = load_img_png(f"tiles/{filename}")
-    if surf is None:
+    path = ASSETS_TILE / filename
+    if not path.is_file():
         return None
-    return pygame.transform.scale(surf, (TILE_SIZE, TILE_SIZE))
+    try:
+        surf = pygame.image.load(str(path))
+        try:
+            surf = surf.convert_alpha()
+        except pygame.error:
+            surf = surf.convert()
+        return pygame.transform.scale(surf, (TILE_SIZE, TILE_SIZE))
+    except pygame.error:
+        return None
 
 
 def _get_cached_tile(key: str, loader):

@@ -62,6 +62,7 @@ from .level_modes import (
 )
 from .map_tile_loader import surface_for_gid
 from .mode_cooldowns import ModeCooldowns
+from .perf import rect_in_play_view
 from .projectile import NumericProjectile
 from .enemy_archetypes import create_enemy
 from . import enemy_special
@@ -137,6 +138,10 @@ def init_level(
         derivative_group.add(CalculusBlock((cx, cy), "derivative", map_spawned=True))
     for cx, cy, axis in world.calculus_integral_spawns:
         integral_group.add(CalculusBlock((cx, cy), "integral", axis=axis, map_spawned=True))
+    for cx, cy in world.calculus_square_spawns:
+        square_group.add(CalculusBlock((cx, cy), "square", map_spawned=True))
+    for cx, cy in world.calculus_sqrt_spawns:
+        sqrt_group.add(CalculusBlock((cx, cy), "sqrt", map_spawned=True))
     player = Player(*world.player_spawn)
     return world, player
 
@@ -177,29 +182,78 @@ def main():
     font_large = get_font(48, bold=True)
     font_med = get_font(24, bold=True)
 
+    player = None
+    player_is_flattened = False
+    state = GameState.MENU
+
     def present_screen(*, flatten_focus: bool = False) -> None:
         window.fill((0, 0, 0))
-        if (
+        now = pygame.time.get_ticks()
+        crush_start = int(getattr(player, "crush_anim_start_ms", 0)) if player is not None else 0
+        crush_view = (
             flatten_focus
             and player is not None
             and player_is_flattened
+            and crush_start
             and state in (GameState.PLAYING, GameState.DEATH)
-        ):
-            z = FLATTEN_VIEW_ZOOM
-            sw = max(view_w + 1, int(view_w * z))
-            sh = max(view_h + 1, int(view_h * z))
-            big = pygame.transform.smoothscale(screen, (sw, sh))
-            prx = player.rect.centerx / SCREEN_WIDTH
-            pry = player.rect.centery / SCREEN_HEIGHT
-            bx = int(prx * sw)
-            by = int(pry * sh)
-            src_x = max(0, min(bx - view_w // 2, sw - view_w))
-            src_y = max(0, min(by - view_h // 2, sh - view_h))
-            window.blit(big, (view_x, view_y), pygame.Rect(src_x, src_y, view_w, view_h))
+        )
+        if crush_view:
+            sample_ms = enemy_special.crush_viewport_sample_ms(now, crush_start)
+            cx, cy = player.crush_anim_center
+            frame = enemy_special.build_crush_viewport_surface(
+                screen,
+                cx,
+                cy,
+                SCREEN_WIDTH,
+                SCREEN_HEIGHT,
+                sample_ms,
+                crush_start,
+            )
+            scaled = pygame.transform.smoothscale(frame, (view_w, view_h))
+            window.blit(scaled, (view_x, view_y))
+            if (
+                state == GameState.DEATH
+                and death_prompt_ready
+                and enemy_special.crush_viewport_done(now, crush_start)
+            ):
+                msg_rect, btn_rect = enemy_special.crush_death_ui_layout(
+                    view_x,
+                    view_y,
+                    view_w,
+                    view_h,
+                    scale,
+                    revive_btn.rect.w,
+                    revive_btn.rect.h,
+                )
+                enemy_special.draw_crush_death_ui_on_window(
+                    window,
+                    font_large,
+                    font_med,
+                    btn_panel,
+                    msg_rect,
+                    btn_rect,
+                )
         else:
             scaled = pygame.transform.smoothscale(screen, (view_w, view_h))
             window.blit(scaled, (view_x, view_y))
         pygame.display.update()
+
+    def crush_revive_btn_window_rect() -> pygame.Rect | None:
+        if player is None or not player_is_flattened:
+            return None
+        start = int(getattr(player, "crush_anim_start_ms", 0))
+        if not start or not enemy_special.crush_viewport_done(pygame.time.get_ticks(), start):
+            return None
+        _msg, btn = enemy_special.crush_death_ui_layout(
+            view_x,
+            view_y,
+            view_w,
+            view_h,
+            scale,
+            revive_btn.rect.w,
+            revive_btn.rect.h,
+        )
+        return btn
 
     def pump_boot_events() -> bool:
         """處理啟動階段事件；QUIT 時回傳 False。"""
@@ -255,7 +309,6 @@ def main():
     area_drag_fling_anchor_my = 0.0
     player_is_flattened = False
     player_crush_kill_at_ms = 0
-    FLATTEN_VIEW_ZOOM = 1.38
 
     state = GameState.MENU
     level = 1
@@ -275,7 +328,7 @@ def main():
     back_panel = get_ui_button_background(120, 44)
     start_btn = TextButton(cx, SCREEN_HEIGHT // 2 - 120, "START", font_med, btn_w, btn_h, bg_surface=btn_panel)
     guide_btn = TextButton(cx, SCREEN_HEIGHT // 2 - 30, "玩法介紹", font_med, btn_w, btn_h, bg_surface=btn_panel)
-    settings_btn = TextButton(cx, SCREEN_HEIGHT // 2 + 60, "設置", font_med, btn_w, btn_h, bg_surface=btn_panel)
+    settings_btn = TextButton(cx, SCREEN_HEIGHT // 2 + 60, "設定", font_med, btn_w, btn_h, bg_surface=btn_panel)
     exit_btn = TextButton(cx, SCREEN_HEIGHT // 2 + 150, "EXIT", font_med, btn_w, btn_h, bg_surface=btn_panel)
     lvl_bw, lvl_bh = 168, 52
     lvl_panel_btn = get_ui_button_background(lvl_bw, lvl_bh)
@@ -382,23 +435,34 @@ def main():
         """開局／換關／重載後，讓玩家出現在螢幕上對應捲動位置。"""
         align_camera_to_world_x(player.rect.centerx)
 
-    def align_camera_center_player() -> None:
-        """壓扁時：玩家維持在畫面水平中央。"""
-        if world is None or player is None:
-            return
-        scroll_max = world.scroll_max_px(SCREEN_WIDTH)
-        desired = int(player.rect.centerx) - SCREEN_WIDTH // 2
-        desired = max(0, min(desired, scroll_max))
-        delta = desired - background_scroll
-        if delta != 0:
-            shift_world(-delta)
-            player.rect.x -= delta
-        background_scroll = desired
+    def apply_pending_giant_crush() -> None:
+        nonlocal player_is_flattened, player_crush_kill_at_ms, background_scroll
+        if getattr(player, "giant_crush_flatten", False):
+            player.giant_crush_flatten = False
+            player_is_flattened = True
+            if world is not None:
+                player._crush_landed = enemy_special.snap_player_to_ground_for_crush(
+                    player, world, area_group, enemy_group,
+                )
+                enemy_special.prepare_player_crush_pose(player)
+                player.crush_anim_center = (int(player.rect.centerx), int(player.rect.centery))
+                player.crush_anim_feet = int(player.rect.bottom)
+            player_crush_kill_at_ms = int(getattr(player, "giant_crush_kill_at_ms", now_ms + enemy_special.CRUSH_ANIM_MS))
+            if not getattr(player, "crush_frozen_scroll", 0):
+                player.crush_frozen_scroll = background_scroll
+            background_scroll = player.crush_frozen_scroll
+            lock_player_input()
 
     def reset_player_crush_state() -> None:
         nonlocal player_is_flattened, player_crush_kill_at_ms
         player_is_flattened = False
         player_crush_kill_at_ms = 0
+        player.giant_crush_flatten = False
+        player.giant_crush_kill_at_ms = 0
+        player.crush_anim_start_ms = 0
+        player.crush_anim_feet = 0
+        player.crush_frozen_scroll = 0
+        player._crush_landed = False
 
     def underwater_ambient_visible() -> bool:
         view = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
@@ -411,6 +475,26 @@ def main():
                 return True
         return False
 
+    def player_can_act() -> bool:
+        """可操作：存活、非壓扁死亡動畫、非死亡動作。"""
+        return (
+            player.health > 0
+            and player.is_alive
+            and not player_is_flattened
+            and player.action != ActionTypes.DEATH
+        )
+
+    def lock_player_input():
+        nonlocal is_left, is_right, sigma_mouse_down_ms, sigma_schedule
+        is_left = is_right = False
+        player.is_jump = False
+        player.is_aiming = False
+        controller.force_idle()
+        brush_manager.end_stroke()
+        reset_area_drag()
+        sigma_mouse_down_ms = None
+        sigma_schedule.clear()
+
     def respawn_player_after_death():
         nonlocal state, death_prompt_ready, death_click_lock, is_left, is_right
         reload_current_level()
@@ -418,7 +502,7 @@ def main():
         death_click_lock = False
         death_fade.reset()
         state = GameState.PLAYING
-        is_left = is_right = False
+        lock_player_input()
 
     def normalize_player_for_level():
         cfg = get_level_mode_config(level)
@@ -771,7 +855,7 @@ def main():
                 shade = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
                 shade.fill((0, 0, 0, 120))
                 screen.blit(shade, (0, 0))
-                title = font_large.render("設置", True, WHITE)
+                title = font_large.render("設定", True, WHITE)
                 screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 100)))
                 back_btn.draw(screen)
                 if can_click and back_btn.rect.collidepoint(mpos):
@@ -791,7 +875,7 @@ def main():
                     if can_click and rect.collidepoint(mpos):
                         apply_resolution((rw, rh))
                         menu_click_lock = True
-                sub2 = font_med.render("聲音設置", True, WHITE)
+                sub2 = font_med.render("聲音設定", True, WHITE)
                 screen.blit(sub2, (760, 170))
                 bgm_bar = pygame.Rect(760, 240, 520, 14)
                 sfx_bar = pygame.Rect(760, 340, 520, 14)
@@ -911,7 +995,7 @@ def main():
                         apply_resolution((rw, rh))
                         pause_click_lock = True
 
-                sub2 = font_med.render("聲音設置", True, WHITE)
+                sub2 = font_med.render("聲音設定", True, WHITE)
                 screen.blit(sub2, (760, 170))
                 bgm_bar = pygame.Rect(760, 240, 520, 14)
                 sfx_bar = pygame.Rect(760, 340, 520, 14)
@@ -936,8 +1020,9 @@ def main():
                         pass
 
         elif state == GameState.PLAYING:
+            apply_pending_giant_crush()
             if player_is_flattened:
-                align_camera_center_player()
+                background_scroll = player.crush_frozen_scroll
                 is_left = is_right = False
             draw_parallax_background(screen, background_scroll)
             world.update_animated_tiles(now_ms)
@@ -946,14 +1031,14 @@ def main():
             world.draw_spike_switches(screen)
             water_group.draw(screen)
             for deco in decoration_group:
-                if isinstance(deco, KenneyVisualTile):
+                if isinstance(deco, KenneyVisualTile) and rect_in_play_view(deco.rect, margin=128):
                     deco.update_visual(now_ms)
             decoration_group.draw(screen)
             exit_group.draw(screen)
             health_box_group.draw(screen)
             heart_group.draw(screen)
             key_pickup_group.draw(screen)
-            if player.is_alive:
+            if player_can_act():
                 brush_manager.set_zone_center_x(player.rect.centerx)
             if player.game_mode in (
                 PlayerMode.DERIVATIVE_BLOCK,
@@ -970,11 +1055,35 @@ def main():
                 screen.blit(zone_overlay, (_zx, _zy))
                 pygame.draw.rect(screen, (255, 255, 255), (_zx, _zy, zone_w, zone_h), 2)
 
-            if player.is_alive:
-                if player_is_flattened:
-                    is_left = is_right = False
+            if not player_can_act():
+                lock_player_input()
+
+            screen_scroll = 0
+            if player_is_flattened and player.is_alive:
+                if world is not None and not getattr(player, "_crush_landed", False):
+                    if enemy_special.snap_player_to_ground_for_crush(
+                        player, world, area_group, enemy_group,
+                    ):
+                        player._crush_landed = True
+                        player.crush_anim_center = (
+                            int(player.rect.centerx),
+                            int(player.rect.centery),
+                        )
+                        player.crush_anim_feet = int(player.rect.bottom)
+                if player.action != ActionTypes.DEATH:
+                    enemy_special.prepare_player_crush_pose(player)
                 if player_crush_kill_at_ms and now_ms >= player_crush_kill_at_ms:
                     player.health = 0.0
+                    player.check_alive()
+                    lock_player_input()
+                    player_crush_kill_at_ms = 0
+                player.vel_y = 0.0
+                player.is_in_air = False
+            elif player_can_act():
+                if player_crush_kill_at_ms and now_ms >= player_crush_kill_at_ms:
+                    player.health = 0.0
+                    player.check_alive()
+                    lock_player_input()
                     player_crush_kill_at_ms = 0
                 for enemy in list(enemy_group):
                     if enemy_special.try_exp_flyer_player_touch(player, enemy):
@@ -987,9 +1096,7 @@ def main():
                             now_ms,
                             duration_ms=3000,
                         )
-                        controller.force_idle()
-                        brush_manager.end_stroke()
-                        reset_area_drag()
+                        lock_player_input()
                         break
                 screen_scroll = player.move(
                     is_left,
@@ -1048,19 +1155,36 @@ def main():
                             )
                     deco.kill()
 
+            _nearby_derivative_blocks = tuple(derivative_group.sprites())
+            _nearby_integral_blocks = tuple(integral_group.sprites())
+            _nearby_square_blocks = tuple(square_group.sprites())
+            player._live_background_scroll = background_scroll
             for enemy in enemy_group:
-                if getattr(enemy, "pending_crush_player", False):
-                    zone = enemy.rect.inflate(TILE_SIZE * 2, TILE_SIZE)
-                    if player.rect.colliderect(zone):
-                        player_is_flattened = True
-                        player_crush_kill_at_ms = now_ms + 2500
-                        controller.force_idle()
-                        brush_manager.end_stroke()
-                        reset_area_drag()
-                    enemy.pending_crush_player = False
-                enemy._nearby_derivative_blocks = tuple(derivative_group.sprites())
-                enemy._nearby_integral_blocks = tuple(integral_group.sprites())
-                enemy.ai(player, world, enemy_bullet_group, area_group, enemy_group)
+                on_screen = rect_in_play_view(enemy.rect) or enemy.is_in_air
+                is_giant = enemy_special.is_giant_colossus_enemy(enemy)
+                if on_screen or is_giant:
+                    enemy._nearby_derivative_blocks = _nearby_derivative_blocks
+                    enemy._nearby_integral_blocks = _nearby_integral_blocks
+                    enemy._nearby_square_blocks = _nearby_square_blocks
+                    enemy.ai(
+                        player,
+                        world,
+                        enemy_bullet_group,
+                        area_group,
+                        enemy_group,
+                        projectile_group,
+                        numeric_group,
+                    )
+                    if is_giant and player.is_alive:
+                        enemy_special.try_apply_giant_crush(
+                            enemy,
+                            player,
+                            now_ms,
+                            frozen_scroll=background_scroll,
+                            world=world,
+                            area_group=area_group,
+                            enemy_group=enemy_group,
+                        )
                 enemy.update_cooldowns()
                 enemy.check_alive()
                 if (
@@ -1075,16 +1199,19 @@ def main():
                         )
                     )
                     enemy._key_drop_spawned = True
-
-            for enemy in list(enemy_group):
-                if not enemy.is_alive:
-                    if enemy.frame_index >= len(enemy.animation_list[ActionTypes.DEATH]) - 1:
-                        enemy.kill()
+                if not enemy.is_alive and enemy.frame_index >= len(
+                    enemy.animation_list[ActionTypes.DEATH],
+                ) - 1:
+                    enemy.kill()
 
             for b in enemy_bullet_group:
                 b.update(world, player, area_group)
 
-            controller.update(mouse_pos=game_mouse_pos())
+            player.check_alive()
+            if not player.is_alive:
+                lock_player_input()
+            if player_can_act():
+                controller.update(mouse_pos=game_mouse_pos())
             if getattr(player, "pop_sound_requests", 0) > 0:
                 player.pop_sound_requests = 0
                 if not game_audio.is_bubble_repeat_active():
@@ -1136,6 +1263,10 @@ def main():
             for r in list(sqrt_group):
                 resolve_algebra_block_interactions(r, player, projectile_group, enemy_group)
 
+            apply_pending_giant_crush()
+            if player_is_flattened:
+                background_scroll = player.crush_frozen_scroll
+
             ref_r = max(1.0, float(player.rect.width) * 2.0)
             for center, ci in brush_manager.drain_tap_circles():
                 for body in build_area_bodies_from_circle(
@@ -1160,7 +1291,11 @@ def main():
             for ar in list(area_group):
                 ar.update(world, enemy_group, player)
 
-            if player.game_mode == PlayerMode.AREA_MOVE and area_drag_target is not None:
+            if (
+                player_can_act()
+                and player.game_mode == PlayerMode.AREA_MOVE
+                and area_drag_target is not None
+            ):
                 tgt = area_drag_target
                 if not tgt.alive():
                     reset_area_drag()
@@ -1205,30 +1340,34 @@ def main():
                     area_fling_mouse_end_mx = float(mx2)
                     area_fling_mouse_end_my = float(my2)
 
-            while sigma_schedule and sigma_schedule[0][0] <= now_ms:
-                _, val = sigma_schedule.pop(0)
-                mx, my = game_mouse_pos()
-                px, py = player.rect.center
-                dxw = mx - px
-                dyw = -(my - py)
-                norm = math.hypot(dxw, dyw) or 1.0
-                numeric_group.add(
-                    NumericProjectile((px, py), dxw / norm, dyw / norm, val),
-                )
-                if val != 0:
-                    game_audio.play_shot(at_rect=player.rect)
-            if not sigma_schedule and game_audio.is_bubble_repeat_active():
-                game_audio.stop_bubble_repeat()
+            if player_can_act():
+                while sigma_schedule and sigma_schedule[0][0] <= now_ms:
+                    _, val = sigma_schedule.pop(0)
+                    mx, my = game_mouse_pos()
+                    px, py = player.rect.center
+                    dxw = mx - px
+                    dyw = -(my - py)
+                    norm = math.hypot(dxw, dyw) or 1.0
+                    numeric_group.add(
+                        NumericProjectile((px, py), dxw / norm, dyw / norm, val),
+                    )
+                    if val != 0:
+                        game_audio.play_shot(at_rect=player.rect)
+                if not sigma_schedule and game_audio.is_bubble_repeat_active():
+                    game_audio.stop_bubble_repeat()
 
-            if (
-                get_level_mode_config(level).mode_allowed(PlayerMode.SIGMOID)
-                and player.game_mode == PlayerMode.SIGMOID
-            ):
-                mx, my = game_mouse_pos()
-                try_sigmoid_on_enemy_bullet(mx, my, enemy_bullet_group)
+                if (
+                    get_level_mode_config(level).mode_allowed(PlayerMode.SIGMOID)
+                    and player.game_mode == PlayerMode.SIGMOID
+                ):
+                    mx, my = game_mouse_pos()
+                    try_sigmoid_on_enemy_bullet(mx, my, enemy_bullet_group)
 
-            if pygame.sprite.spritecollide(player, water_group, False) and player.is_alive:
+            if pygame.sprite.spritecollide(player, water_group, False) and player.is_alive and not player_is_flattened:
                 player.health = 0.0
+                player.check_alive()
+                if not player.is_alive:
+                    lock_player_input()
 
             for box in list(health_box_group):
                 box.update(player)
@@ -1239,7 +1378,7 @@ def main():
             for key_pk in list(key_pickup_group):
                 key_pk.update(player)
 
-            if player.is_alive:
+            if player.is_alive and not player_is_flattened:
                 world.update_spike_flip_on_player_contact(player.rect)
                 world.try_toggle_spike_switch(
                     player.rect, area_group, integral_group, derivative_group,
@@ -1253,17 +1392,26 @@ def main():
                         player.take_damage(player.max_health / 10.0)
                         game_audio.play_spike_hit(at_rect=player.rect)
                         last_spike_damage_ms = now_ms
+                        player.check_alive()
+                        if not player.is_alive:
+                            lock_player_input()
                     for enemy in enemy_group:
                         if not enemy.is_alive:
                             continue
-                        if not enemy.feet_on_spike_damage(world):
+                        if not enemy.feet_on_spike_damage(world, spike_rects):
                             continue
                         if enemy_special.is_calc_tank_enemy(enemy):
                             enemy_special.calc_tank_kill(enemy)
                             continue
+                        if enemy_special.is_tiny_fraction_enemy(enemy):
+                            enemy_special.tiny_fraction_kill(enemy)
+                            game_audio.play_spike_hit(at_rect=enemy.rect)
+                            continue
                         if now_ms - enemy._last_spike_damage_ms < SPIKE_DAMAGE_INTERVAL_MS:
                             continue
-                        enemy.take_damage(max(enemy.max_health / 10.0, 1.0))
+                        spike_dmg = enemy.max_health / 10.0
+                        spike_floor = min(1.0, float(enemy.max_health))
+                        enemy.take_damage(max(spike_dmg, spike_floor))
                         game_audio.play_spike_hit(at_rect=enemy.rect)
                         enemy._last_spike_damage_ms = now_ms
                         enemy.check_alive()
@@ -1271,58 +1419,55 @@ def main():
             if player.is_alive and pygame.sprite.spritecollide(player, exit_group, False):
                 level += 1
                 if level > MAX_LEVEL:
-                    state = GameState.WIN
-                else:
-                    world, player = init_level(
-                        level,
-                        projectile_group,
-                        enemy_bullet_group,
-                        enemy_group,
-                        water_group,
-                        decoration_group,
-                        exit_group,
-                        health_box_group,
-                        heart_group,
-                        key_pickup_group,
-                        derivative_group,
-                        integral_group,
-                        square_group,
-                        sqrt_group,
-                        area_group,
-                        numeric_group,
-                        brush_manager,
-                    )
-                    reset_area_drag()
-                    health_bar = HealthBar(10, 10, player.max_health)
-                    controller = EquationController(player, projectile_group)
-                    sigma_schedule.clear()
-                    game_audio.stop_all_sfx()
-                    last_spike_damage_ms = 0
-                    normalize_player_for_level()
-                    is_opening = True
-                    opening_fade.reset()
-                    background_scroll = 0
-                    is_left = is_right = False
-                    align_camera_to_player()
-                    continue
+                    level = 1
+                world, player = init_level(
+                    level,
+                    projectile_group,
+                    enemy_bullet_group,
+                    enemy_group,
+                    water_group,
+                    decoration_group,
+                    exit_group,
+                    health_box_group,
+                    heart_group,
+                    key_pickup_group,
+                    derivative_group,
+                    integral_group,
+                    square_group,
+                    sqrt_group,
+                    area_group,
+                    numeric_group,
+                    brush_manager,
+                )
+                reset_area_drag()
+                health_bar = HealthBar(10, 10, player.max_health)
+                controller = EquationController(player, projectile_group)
+                sigma_schedule.clear()
+                game_audio.stop_all_sfx()
+                last_spike_damage_ms = 0
+                normalize_player_for_level()
+                is_opening = True
+                opening_fade.reset()
+                background_scroll = 0
+                is_left = is_right = False
+                align_camera_to_player()
+                continue
 
             player.update_animation()
             for enemy in enemy_group:
-                enemy.update_animation()
+                if rect_in_play_view(enemy.rect, margin=64) or enemy.is_in_air:
+                    enemy.update_animation()
 
             brush_manager.draw(screen)
 
             for enemy in enemy_group:
+                if not rect_in_play_view(enemy.rect, margin=32):
+                    continue
                 enemy.draw(screen)
                 if enemy.is_alive:
                     blit_enemy_head_label(screen, font_small, enemy, WHITE)
             if player_is_flattened:
-                flat = player.image.copy()
-                fw = max(4, int(flat.get_width()))
-                fh = max(2, int(flat.get_height() * 0.22))
-                flat = pygame.transform.smoothscale(flat, (fw, fh))
-                fr = flat.get_rect(midbottom=player.rect.midbottom)
-                screen.blit(flat, fr)
+                enemy_special.draw_player_crush_squash(screen, player, now_ms)
             else:
                 player.draw(screen)
             if player.heal_sigmoid_active:
@@ -1388,6 +1533,13 @@ def main():
                     (10, hud_y),
                 )
                 hud_y += 20
+            if lvl_cfg_hud.allow_brush_b:
+                screen.blit(
+                    font_small.render("B:畫筆 雙擊B:拖移", True, BLACK),
+                    (10, hud_y),
+                )
+                hud_y += 20
+            screen.blit(font_small.render("R: Restart", True, BLACK), (10, hud_y))
 
             controller.draw_polynomial_center_msg(screen, font_med)
             if int(getattr(player, "center_notice_until_ms", 0)) > now_ms:
@@ -1449,12 +1601,17 @@ def main():
 
             player.check_alive()
             if not player.is_alive:
+                lock_player_input()
                 state = GameState.DEATH
-                death_fade.reset()
-                death_prompt_ready = False
                 death_click_lock = True
                 game_audio.stop_all_sfx()
                 game_audio.play_player_death(at_rect=player.rect)
+                if player_is_flattened:
+                    death_fade.counter = SCREEN_HEIGHT
+                    death_prompt_ready = False
+                else:
+                    death_fade.reset()
+                    death_prompt_ready = False
 
             if is_opening:
                 if opening_fade.fade_in(screen):
@@ -1462,53 +1619,83 @@ def main():
 
             game_audio.set_underwater_bubbles_active(underwater_ambient_visible())
             draw_control_hint_strip(screen)
-            area_dragging = (
-                player.game_mode == PlayerMode.AREA_MOVE
-                and area_drag_target is not None
-                and pygame.mouse.get_pressed()[0]
-            )
-            draw_playing_cursor(
-                screen,
-                game_mouse_pos(),
-                player.game_mode,
-                area_dragging=area_dragging,
-                integral_axis=getattr(player, "integral_axis", None),
-            )
+            if player_can_act():
+                area_dragging = (
+                    player.game_mode == PlayerMode.AREA_MOVE
+                    and area_drag_target is not None
+                    and pygame.mouse.get_pressed()[0]
+                )
+                draw_playing_cursor(
+                    screen,
+                    game_mouse_pos(),
+                    player.game_mode,
+                    area_dragging=area_dragging,
+                    integral_axis=getattr(player, "integral_axis", None),
+                )
 
         elif state == GameState.DEATH:
-            player.update_animation()
+            lock_player_input()
+            if player_is_flattened:
+                background_scroll = player.crush_frozen_scroll
+                crush_start = int(getattr(player, "crush_anim_start_ms", 0))
+                if crush_start and enemy_special.crush_viewport_done(now_ms, crush_start):
+                    death_prompt_ready = True
+            if player_is_flattened:
+                enemy_special.prepare_player_crush_pose(player)
+            else:
+                player.update_animation()
             game_audio.set_underwater_bubbles_active(False)
             draw_parallax_background(screen, background_scroll)
+            world.update_animated_tiles(now_ms)
             world.draw_obstacles(screen)
             world.draw_spikes(screen)
             world.draw_spike_switches(screen)
             water_group.draw(screen)
+            decoration_group.draw(screen)
+            exit_group.draw(screen)
+            health_box_group.draw(screen)
             heart_group.draw(screen)
+            key_pickup_group.draw(screen)
+            brush_manager.draw(screen)
             for enemy in enemy_group:
                 enemy.draw(screen)
+                if enemy.is_alive:
+                    blit_enemy_head_label(screen, font_small, enemy, WHITE)
+            enemy_bullet_group.draw(screen)
+            projectile_group.draw(screen)
+            numeric_group.draw(screen)
+            area_group.draw(screen)
+            derivative_group.draw(screen)
+            integral_group.draw(screen)
+            square_group.draw(screen)
+            sqrt_group.draw(screen)
             if player_is_flattened:
-                flat = player.image.copy()
-                fw = max(4, int(flat.get_width()))
-                fh = max(2, int(flat.get_height() * 0.22))
-                flat = pygame.transform.smoothscale(flat, (fw, fh))
-                fr = flat.get_rect(midbottom=player.rect.midbottom)
-                screen.blit(flat, fr)
+                enemy_special.draw_player_crush_squash(screen, player, now_ms)
             else:
                 player.draw(screen)
             health_bar.draw(screen, 0)
-            done = death_fade.fade_out(screen)
-            if done:
-                death_prompt_ready = True
-                msg = font_large.render("YOU DIED", True, WHITE)
-                screen.blit(msg, msg.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 120)))
-                revive_btn.draw(screen)
-                pressed = pygame.mouse.get_pressed()[0]
-                mpos = game_mouse_pos()
-                can_click = pressed and not death_click_lock
-                if not pressed:
-                    death_click_lock = False
-                if can_click and revive_btn.rect.collidepoint(mpos):
-                    respawn_player_after_death()
+            if player_is_flattened and death_prompt_ready:
+                crush_btn = crush_revive_btn_window_rect()
+                if crush_btn is not None:
+                    pressed = pygame.mouse.get_pressed()[0]
+                    if not pressed:
+                        death_click_lock = False
+                    elif not death_click_lock and crush_btn.collidepoint(pygame.mouse.get_pos()):
+                        respawn_player_after_death()
+            elif not player_is_flattened:
+                done = death_fade.fade_out(screen)
+                if done:
+                    death_prompt_ready = True
+                    msg = font_large.render("YOU DIED", True, WHITE)
+                    screen.blit(msg, msg.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 120)))
+                    revive_btn.draw(screen)
+                    pressed = pygame.mouse.get_pressed()[0]
+                    mpos = game_mouse_pos()
+                    can_click = pressed and not death_click_lock
+                    if not pressed:
+                        death_click_lock = False
+                    if can_click and revive_btn.rect.collidepoint(mpos):
+                        respawn_player_after_death()
 
         elif state == GameState.WIN:
             win_text = font_large.render("YOU WIN!", True, GOLD)
@@ -1526,9 +1713,13 @@ def main():
                 quit_game()
             if state == GameState.DEATH and death_prompt_ready:
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    mx, my = game_mouse_pos()
-                    if revive_btn.rect.collidepoint(mx, my):
+                    crush_btn = crush_revive_btn_window_rect()
+                    if crush_btn is not None and crush_btn.collidepoint(event.pos):
                         respawn_player_after_death()
+                    else:
+                        mx, my = game_mouse_pos()
+                        if revive_btn.rect.collidepoint(mx, my):
+                            respawn_player_after_death()
             if state == GameState.MENU:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     if menu_page in ("settings", "guide", "level_select"):
@@ -1536,7 +1727,7 @@ def main():
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
                     if menu_page in ("settings", "guide", "level_select"):
                         menu_page = "main"
-            if state == GameState.PLAYING and player.is_alive:
+            if state == GameState.PLAYING and player_can_act():
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
                     reload_current_level()
                     is_opening = True

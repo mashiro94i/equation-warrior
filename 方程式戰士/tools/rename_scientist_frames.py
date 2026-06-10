@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 GAME_ROOT = Path(__file__).resolve().parent.parent
-PIPELINE = GAME_ROOT / "assets" / "img" / "player" / "scientist" / "_pipeline"
+PIPELINE = GAME_ROOT / "tools" / "scientist_pipeline"
 DELIVER = GAME_ROOT / "assets" / "img" / "player" / "scientist"
 
 ACTIONS = {

@@ -129,14 +129,15 @@ class MathProjectile(pygame.sprite.Sprite):
                     self.kill()
                     return
         for enemy in list(enemy_group):
-            if enemy.is_alive and pygame.sprite.collide_rect(self, enemy):
-                from .enemy_special import (
-                    can_take_projectile_damage,
-                    mark_projectile_passed_through,
-                    on_projectile_hit,
-                    projectile_passes_through_enemy,
-                )
+            from .enemy_special import (
+                can_take_projectile_damage,
+                enemy_collides_rect,
+                mark_projectile_passed_through,
+                on_projectile_hit,
+                projectile_passes_through_enemy,
+            )
 
+            if enemy_collides_rect(enemy, self.rect):
                 if projectile_passes_through_enemy(enemy, self):
                     mark_projectile_passed_through(self)
                     continue
@@ -257,14 +258,15 @@ class NumericProjectile(pygame.sprite.Sprite):
                     self.kill()
                     return
         for enemy in list(enemy_group):
-            if enemy.is_alive and pygame.sprite.collide_rect(self, enemy):
-                from .enemy_special import (
-                    can_take_projectile_damage,
-                    mark_projectile_passed_through,
-                    on_projectile_hit,
-                    projectile_passes_through_enemy,
-                )
+            from .enemy_special import (
+                can_take_projectile_damage,
+                enemy_collides_rect,
+                mark_projectile_passed_through,
+                on_projectile_hit,
+                projectile_passes_through_enemy,
+            )
 
+            if enemy_collides_rect(enemy, self.rect):
                 if projectile_passes_through_enemy(enemy, self):
                     mark_projectile_passed_through(self)
                     continue

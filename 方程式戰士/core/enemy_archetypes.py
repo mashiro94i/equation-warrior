@@ -6,6 +6,11 @@ from dataclasses import dataclass
 
 GID_AREA_SPRAYER = 65822
 GID_TINY_FRACTION = 65820
+TINY_FRACTION_MIN_PX = 40
+
+
+def is_tiny_fraction_enemy(enemy) -> bool:
+    return int(getattr(enemy, "enemy_gid", 0)) == GID_TINY_FRACTION
 GID_NEGATIVE_ONE = 65823
 GID_GIANT_256 = 131437
 GID_EXP_X = 131449
@@ -35,6 +40,7 @@ ALL_SPECIAL_ENEMY_GIDS = frozenset({
 class EnemyArchetype:
     max_hp: float
     head_label: str | None = None
+    label_suffix: str | None = None
     speed_mult: float = 1.0
     shoot_cd_mult: float = 1.0
     scale_mult: float = 1.0
@@ -76,7 +82,8 @@ def archetype_for_gid(gid: int) -> EnemyArchetype | None:
     if g == GID_TINY_FRACTION:
         return EnemyArchetype(
             0.01, head_label="0.01", speed_mult=10.0, shoot_cd_mult=1.0 / 3.0,
-            scale_mult=0.1, alpha=178, chase_aggressive=True, ai="tiny_fraction",
+            scale_mult=0.1, alpha=255, chase_aggressive=True, ai="tiny_fraction",
+            invincible=True,
         )
     if g == GID_NEGATIVE_ONE:
         return EnemyArchetype(
@@ -90,10 +97,11 @@ def archetype_for_gid(gid: int) -> EnemyArchetype | None:
         )
     if g == GID_GIANT_256:
         return EnemyArchetype(
-            256.0,
-            head_label="256",
+            512.0,
+            head_label="512",
             speed_mult=0.25,
-            ai="chase_melee",
+            scale_mult=2.0,
+            ai="giant_256",
             chase_aggressive=True,
             melee_bump=True,
         )
@@ -126,7 +134,10 @@ def archetype_for_gid(gid: int) -> EnemyArchetype | None:
             chase_aggressive=True,
         )
     if g == GID_CHASHER:
-        return EnemyArchetype(100.0, chase_aggressive=True, ai="chase_melee", melee_bump=True)
+        return EnemyArchetype(
+            100.0, chase_aggressive=True, ai="chase_melee", melee_bump=True,
+            label_suffix="e^x",
+        )
     if g == GID_SHOOTER:
-        return EnemyArchetype(100.0, ai="default")
+        return EnemyArchetype(100.0, ai="default", label_suffix="e^x")
     return None

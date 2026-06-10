@@ -17,7 +17,7 @@ from generate2dsprite import (  # noqa: E402
     trim_border,
 )
 
-PIPELINE = GAME_ROOT / "assets" / "img" / "player" / "scientist" / "_pipeline"
+PIPELINE = GAME_ROOT / "tools" / "scientist_pipeline"
 DELIVER = GAME_ROOT / "assets" / "img" / "player" / "scientist"
 CELL = 128
 FIT = 0.85

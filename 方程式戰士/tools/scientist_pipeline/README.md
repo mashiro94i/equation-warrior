@@ -14,11 +14,14 @@
 | `Death/` | `00`–`05` | 6 | 45（`death_animation_cooldown`） |
 | `projectile/` | `00`–`03` | 4 | 120（彈幕自訂） |
 
-## 除錯／原始產物
+## 除錯／原始產物（本目錄）
 
-- `_pipeline/<Action>/`：`raw-sheet.png`、`sheet-transparent.png`、`animation.gif`、`pipeline-meta.json`
-- `_pipeline/references/`：科學家與藥瓶參考圖
-- `_pipeline/identity-lock.txt`：角色鎖定說明
+- `<Action>/`：`raw-sheet.png`、`sheet-transparent.png`、`animation.gif`、`pipeline-meta.json`
+- `references/`：科學家與藥瓶參考圖
+- `identity-lock.txt`：角色鎖定說明
+- `scientist_spritesheet*.png`：合圖參考
+
+交付用影格在 **`assets/img/player/scientist/`**（本目錄僅開發管線，遊戲執行期不讀）。
 
 ## 遊戲接入（已實作）
 
